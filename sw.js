@@ -1,11 +1,15 @@
 // 离线缓存：首次访问后把页面和公式引擎缓存到本地，之后断网也能打开。
 // 采用「网络优先」：联网时总是拿最新代码，避免发新版后仍加载到旧缓存；断网时回退缓存。
-const CACHE = 'math-review-v5';
+const CACHE = 'sd-review-v1';
 const CORE = [
   './',
   './index.html',
   './styles.css',
   './lib.js',
+  './plot.js',
+  './conv.js',
+  './code.js',
+  './transforms.js',
   './app.js',
   './manifest.json',
   './vendor/katex/katex.min.css',

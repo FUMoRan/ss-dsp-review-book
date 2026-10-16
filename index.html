@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>数学复习本</title>
-<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="88">📘</text></svg>'>
+<title>S&amp;S · DSP 复习本</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="88">📡</text></svg>'>
 <!-- PWA-BEGIN 以下到 PWA-END 之间为「添加到主屏幕」相关配置，离线单文件版会自动移除 -->
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#4c6ef5">
@@ -16,12 +16,16 @@
 <body>
 
 <header>
-  <h1>📘 数学复习本</h1>
+  <h1>📡 S&amp;S · DSP 复习本</h1>
+  <div class="seg subjects" id="subjectSeg" title="切换科目：连续（信号与系统）/ 离散（数字信号处理）">
+    <button data-subject="ss">连续 · S&amp;S</button>
+    <button data-subject="dsp">离散 · DSP</button>
+  </div>
   <div class="tabs">
     <button class="tab active" data-view="q">错题</button>
     <button class="tab" data-view="k">知识点</button>
   </div>
-  <input id="search" class="search" placeholder="搜索…（支持 tag:导数、status:已掌握、star、due）">
+  <input id="search" class="search" placeholder="搜索…（tag:卷积、status:已掌握、star、due、has:img、has:code）">
   <select id="statusFilter">
     <option value="">全部状态</option>
     <option value="new">未复习</option>
@@ -36,8 +40,12 @@
   <button id="groupBtn">分组</button>
   <button id="starBtn">☆ 只看收藏</button>
   <button id="dueBtn">🕒 待复习</button>
+  <button id="imgOnlyBtn">🖼 只看有图</button>
+  <button id="codeOnlyBtn">⌨ 只看有代码</button>
   <button id="randomBtn">随机一题</button>
   <button id="cramBtn">背题模式</button>
+  <button id="refBtn" title="常用变换对 · 性质 · 连续↔离散对照">📐 速查</button>
+  <button id="plotBtn" title="画波形 / 频谱 / 零极图 / 卷积图解">📈 绘图</button>
   <button id="exportBtn">导出</button>
   <button id="importBtn2">导入</button>
   <button class="primary" id="addBtn">+ 新增错题</button>
@@ -67,6 +75,7 @@
     <button data-batch-status="reviewing">标记复习中</button>
     <button data-batch-status="mastered">标记已掌握</button>
     <button id="batchTag">加标签</button>
+    <button id="batchSubject">改科目</button>
     <button id="batchDelete" class="danger">删除</button>
     <span class="spacer"></span>
     <button id="exitSelect">退出多选</button>
@@ -84,6 +93,7 @@
   <div class="panel">
     <h2 id="addTitle">粘贴 AI 内容 / 手动填写</h2>
     <p class="hint" id="addHint">按固定格式粘贴，点「拆分预览」自动拆成字段。多项之间用单独一行 <b>===</b> 分隔。</p>
+    <div class="latex-bar" id="latexBar"></div>
     <textarea id="rawInput"></textarea>
     <pre class="tpl" id="formatHint"></pre>
     <div class="row">
@@ -96,8 +106,10 @@
     <div class="imgrow" id="addImgRow" style="display:none">
       <label>配图（解析出 1 项时可用；多项请在导入后逐个「编辑」添加）</label>
       <div class="thumbs" id="addThumbs"></div>
+      <div class="dropzone" id="addDrop">把图片拖到这里，或直接粘贴（Ctrl+V / 手机长按）</div>
       <div class="row" style="margin-top:8px">
         <button class="ghost" id="addImgBtn">+ 添加图片</button>
+        <button class="ghost" id="addPlotBtn">📈 画图并存为配图</button>
         <span class="badge-note" id="addImgMsg"></span>
       </div>
     </div>
@@ -111,12 +123,15 @@
 <div class="modal" id="editModal">
   <div class="panel">
     <h2 id="editTitle">编辑</h2>
+    <div class="latex-bar" id="latexBarEdit"></div>
     <div id="editForm"></div>
     <div id="editImgs">
-      <label>配图</label>
+      <label>配图（图1、图2…按顺序编号，解析里可写 <b>[图1]</b> 引用）</label>
       <div class="thumbs" id="editThumbs"></div>
+      <div class="dropzone" id="editDrop">把图片拖到这里，或直接粘贴（Ctrl+V / 手机长按）</div>
       <div class="row" style="margin-top:8px">
         <button class="ghost" id="editImgBtn">+ 添加图片</button>
+        <button class="ghost" id="editPlotBtn">📈 画图并存为配图</button>
         <span class="badge-note" id="editImgMsg"></span>
       </div>
     </div>
@@ -139,10 +154,80 @@
   </div>
 </div>
 
-<!-- 图片查看 -->
+<!-- 图片查看（支持多图翻页 + 缩放 + 旋转） -->
 <div class="lightbox" id="lightbox">
-  <img id="lightboxImg" alt="图片">
-  <button class="ghost lightbox-close" id="lightboxClose">关闭</button>
+  <div class="lightbox-bar">
+    <button class="ghost" id="lbPrev" title="上一张">‹</button>
+    <span id="lbIndex" class="lb-index"></span>
+    <button class="ghost" id="lbNext" title="下一张">›</button>
+    <span class="spacer"></span>
+    <button class="ghost" id="lbZoomOut" title="缩小">－</button>
+    <button class="ghost" id="lbZoomIn" title="放大">＋</button>
+    <button class="ghost" id="lbRotate" title="旋转 90°">⟳</button>
+    <button class="ghost" id="lbReset" title="复位">复位</button>
+    <button class="ghost lightbox-close" id="lightboxClose">关闭</button>
+  </div>
+  <div class="lightbox-stage" id="lightboxStage">
+    <img id="lightboxImg" alt="图片">
+  </div>
+</div>
+
+<!-- 速查面板：变换对 / 性质 / 连续↔离散对照 -->
+<div class="drawer" id="refDrawer">
+  <div class="drawer-panel">
+    <div class="row" style="margin:0 0 8px">
+      <h2 style="margin:0; font-size:17px">📐 速查表</h2>
+      <span class="spacer"></span>
+      <button class="ghost" id="refClose">关闭</button>
+    </div>
+    <input id="refSearch" class="search" placeholder="搜索…（如 卷积 / 时移 / z / Parseval / 采样）">
+    <div class="seg" id="refTabs">
+      <button data-ref="pairs" class="on">变换对</button>
+      <button data-ref="props">性质</button>
+      <button data-ref="contrast">连续 ↔ 离散</button>
+      <button data-ref="all">全部</button>
+    </div>
+    <p class="setnote" id="refMsg"></p>
+    <div id="refList"></div>
+  </div>
+</div>
+
+<!-- 绘图面板：时域 / 离散杆图 / 频谱 / Bode / 零极图 / 卷积图解 -->
+<div class="drawer" id="plotDrawer">
+  <div class="drawer-panel">
+    <div class="row" style="margin:0 0 8px">
+      <h2 style="margin:0; font-size:17px">📈 绘图</h2>
+      <span class="spacer"></span>
+      <button class="ghost" id="plotClose">关闭</button>
+    </div>
+    <div class="seg" id="plotKind">
+      <button data-kind="ct" class="on">时域波形</button>
+      <button data-kind="dt">离散杆图</button>
+      <button data-kind="spectrum">频谱</button>
+      <button data-kind="bode">幅频/相频</button>
+      <button data-kind="polezero">零极点图</button>
+      <button data-kind="conv">卷积图解</button>
+    </div>
+    <div id="plotFields"></div>
+    <canvas id="plotCanvas" width="900" height="380"></canvas>
+    <div class="row" id="plotConvCtl" style="display:none">
+      <button id="convPlay">▶ 播放</button>
+      <input type="range" id="convShift" min="0" max="100" value="0">
+      <span class="badge-note" id="convShiftVal">τ = 0</span>
+    </div>
+    <div class="row">
+      <button class="primary" id="plotRender">绘制</button>
+      <button id="plotSample">载入示例</button>
+      <button class="ghost" id="plotSaveImg">存为配图</button>
+      <span class="spacer"></span>
+      <span class="badge-note" id="plotNote"></span>
+    </div>
+    <p class="setnote">
+      表达式用纯文本写：变量 <b>t</b>（连续）、<b>n</b>（离散）、<b>w</b>（角频率）；可用
+      <b>sin cos exp ln sqrt abs u() rect() tri() sinc()</b>，常量 <b>pi</b>。
+      例：<code>sin(2*pi*t)*exp(-2*t)</code>、<code>0.8^n</code>。
+    </p>
+  </div>
 </div>
 
 <!-- AI 识题进行中 -->
@@ -191,7 +276,7 @@
 <div class="modal" id="statsModal">
   <div class="panel">
     <h2>数据统计</h2>
-    <p class="hint">当前两库的整体概览。</p>
+    <p class="hint">当前两库的整体概览（含科目分布）。</p>
     <div id="statsBody"></div>
     <div class="row">
       <button class="ghost" id="statsClose">关闭</button>
@@ -266,6 +351,15 @@
     </div>
 
     <div class="setrow">
+      <span class="lbl">卡片配图</span>
+      <div class="seg" id="setImgSize">
+        <button data-imgsize="small">小图</button>
+        <button data-imgsize="big">大图（图形题推荐）</button>
+      </div>
+      <p class="setnote">「大图」会把卡片里的配图放大展示，适合波形、频谱、零极点图这类需要看刻度细节的题。</p>
+    </div>
+
+    <div class="setrow">
       <span class="lbl">回收站</span>
       <button id="openTrash">打开回收站（<span id="trashCount">0</span>）</button>
     </div>
@@ -316,6 +410,7 @@
       <div class="row" style="margin-top:8px">
         <button id="aiTest">测试连接</button>
         <button class="ghost" id="aiApplyPreset">恢复该服务商默认值</button>
+        <button class="ghost" id="aiPromptBtn">复制给我用的提示词</button>
         <span class="spacer"></span>
         <span class="badge-note" id="aiMsg"></span>
       </div>
@@ -326,6 +421,10 @@
 
 <script src="./vendor/katex/katex.min.js"></script>
 <script src="./lib.js"></script>
+<script src="./plot.js"></script>
+<script src="./conv.js"></script>
+<script src="./code.js"></script>
+<script src="./transforms.js"></script>
 <script src="./app.js"></script>
 <!-- PWA-BEGIN -->
 <script>

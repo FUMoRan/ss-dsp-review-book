@@ -1,23 +1,47 @@
 /* =========================================================
-   数学复习本 · app.js
-   两个视图：q=错题 / k=知识点，数据分开存，共用一套标签
+   S&S · DSP 复习本 · app.js
+   科目：ss = 信号与系统（连续）/ dsp = 数字信号处理（离散），顶部切换，数据按 subject 字段分区。
+   两个视图：q = 错题 / k = 知识点，数据分开存，共用一套标签。
+   在基座（数学复习本）之上新增：
+     · 学科绘图（plot.js / conv.js）与代码高亮（code.js）
+     · 变换对 / 性质 / 连续↔离散 速查表（transforms.js）
+     · 配图编号、顺序调整、卡片大图模式、多图灯箱（翻页/缩放/旋转/拖动）
+     · 拖拽与剪贴板粘贴图片、公式快捷插入条、学科预设标签
+     · 搜索扩展 has:img / has:code、只看有图 / 只看有代码
+     · 学科化 AI 识题提示词（含 MATLAB/Python 代码段）
    ========================================================= */
 
-/* ===================== storage ===================== */
-const K_Q = 'mq_items';
-const K_K = 'mq_kps';
+/* ===================== 存储键 =====================
+   注意：本站与「数学复习本」可能同源（同为 *.github.io），
+   因此 localStorage / IndexedDB 的键名与库名必须完全独立，避免串库。 */
+const K_Q = 'sd_items';
+const K_K = 'sd_kps';
+const K_SET = 'sd_settings';
+const K_TRASH = 'sd_trash';
+const K_AI = 'sd_ai';
+const K_LASTEXPORT = 'sd_lastexport';
+const IDB_NAME = 'sdimg';
 
 /* 纯逻辑统一放在 lib.js（浏览器与单测共用），此处引用即可 */
 const {
+  SUBJECT, SUBJECT_SHORT,
   STATUS, STATUS_NEXT, uid, normText,
   makeGramProfile, simFromProfile,
   parseText, parseSearch,
   normalizeQuestion, normalizeKp, scheduleSrs, isDue, dueLabel, DAY,
 } = MQ;
 
+/* 学科模块（经典脚本已先行加载，挂到 window 上） */
+const MQP = window.MQP || {};   // 绘图
+const MQV = window.MQV || {};   // 卷积图解
+const MQC = window.MQC || {};   // 代码高亮
+const MQT = window.MQT || {};   // 速查表
+
 /* ===================== 设置（偏好，与数据分开存） ===================== */
-const K_SET = 'mq_settings';
-const SET_DEF = { cols: 'auto', theme: 'system', density: 'comfortable', anim: 'on' };
+const SET_DEF = {
+  cols: 'auto', theme: 'system', density: 'comfortable', anim: 'on',
+  imgsize: 'small', subject: 'ss',
+};
 
 function readSettings() {
   try {
@@ -26,6 +50,7 @@ function readSettings() {
   } catch (e) { return {}; }
 }
 const settings = Object.assign({}, SET_DEF, readSettings());
+if (!SUBJECT[settings.subject]) settings.subject = 'ss';
 
 function saveSettings() {
   try { localStorage.setItem(K_SET, JSON.stringify(settings)); } catch (e) {}
@@ -55,6 +80,7 @@ function applySettings() {
   root.dataset.density = settings.density;
   root.dataset.anim = effectiveAnim();
   root.dataset.cols = cols;
+  root.dataset.imgsize = settings.imgsize;
   root.style.setProperty('--cols', cols);
   root.style.setProperty('--mainw', cols >= 3 ? '1560px' : (cols === 2 ? '1180px' : '840px'));
 
@@ -62,6 +88,13 @@ function applySettings() {
   document.querySelectorAll('#setTheme button').forEach(b => b.classList.toggle('on', b.dataset.theme === settings.theme));
   document.querySelectorAll('#setDensity button').forEach(b => b.classList.toggle('on', b.dataset.density === settings.density));
   document.querySelectorAll('#setAnim button').forEach(b => b.classList.toggle('on', b.dataset.anim === settings.anim));
+  document.querySelectorAll('#setImgSize button').forEach(b => b.classList.toggle('on', b.dataset.imgsize === settings.imgsize));
+
+  document.querySelectorAll('#subjectSeg button').forEach(b => {
+    const on = b.dataset.subject === settings.subject;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
 
   const note = document.getElementById('colsNote');
   if (note) {
@@ -71,14 +104,47 @@ function applySettings() {
   }
 }
 
+/* ===================== 通用小工具 ===================== */
+function debounce(fn, ms) {
+  let t;
+  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+function copyText(text) {
+  const s = String(text == null ? '' : text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(s).then(() => true, () => legacyCopy(s));
+  }
+  return Promise.resolve(legacyCopy(s));
+}
+function legacyCopy(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+function moveInArray(arr, dir, id) {
+  const i = arr.indexOf(id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= arr.length) return arr.slice();
+  const out = arr.slice();
+  out[i] = arr[j];
+  out[j] = arr[i];
+  return out;
+}
 
 /* ===================== 图片 / 文本持久化（IndexedDB；文本在 IDB 不可用时回退 localStorage） ===================== */
-const K_TRASH = 'mq_trash';
 let idbPromise = null;
 function idb() {
   if (!idbPromise) {
     idbPromise = new Promise((res, rej) => {
-      const rq = indexedDB.open('mqimg', 2);
+      const rq = indexedDB.open(IDB_NAME, 2);
       rq.onupgradeneeded = () => {
         const db = rq.result;
         if (!db.objectStoreNames.contains('imgs')) db.createObjectStore('imgs', { keyPath: 'id' });
@@ -209,32 +275,178 @@ async function attachImages(item, files) {
   return added;
 }
 
+// 卡片里的配图条：带编号（图1、图2…），与解析中的 [图1] 引用一一对应
 const imgStrip = it => (it.images && it.images.length)
-  ? `<div class="imgs">${it.images.map(id => `<img class="thumb" data-img-id="${id}" alt="配图" loading="lazy">`).join('')}</div>`
+  ? `<div class="imgs">${it.images.map((id, i) =>
+      `<div class="thumb-wrap"><img class="thumb" data-img-id="${esc(id)}" alt="配图" loading="lazy"><span class="thumb-num">图${i + 1}</span></div>`
+    ).join('')}</div>`
   : '';
 
-function renderThumbs(box, ids, onDelete) {
+/* 缩略图编辑区：编号 + 前移/后移 + 删除。onMove(dir, id) 可选。 */
+function renderThumbs(box, ids, onDelete, onMove) {
   if (!ids.length) { box.innerHTML = '<span class="section-label">还没有图片</span>'; return; }
-  box.innerHTML = ids.map(id =>
-    `<div class="thumb-wrap"><img class="thumb" data-img-id="${id}" alt="配图"><button class="thumb-del" data-del="${id}" title="移除">×</button></div>`
-  ).join('');
+  box.innerHTML = ids.map((id, i) => `
+    <div class="thumb-wrap">
+      <img class="thumb" data-img-id="${esc(id)}" alt="配图">
+      <span class="thumb-num">图${i + 1}</span>
+      ${onMove ? `<div class="thumb-move">
+        <button type="button" data-mv="-1" title="前移" ${i === 0 ? 'disabled' : ''}>‹</button>
+        <button type="button" data-mv="1" title="后移" ${i === ids.length - 1 ? 'disabled' : ''}>›</button>
+      </div>` : ''}
+      ${onDelete ? `<button class="thumb-del" data-del="${esc(id)}" title="移除">×</button>` : ''}
+    </div>`).join('');
   hydrateImages(box);
-  box.querySelectorAll('[data-del]').forEach(b => b.onclick = e => { e.stopPropagation(); onDelete(b.dataset.del); });
+  if (onDelete) box.querySelectorAll('[data-del]').forEach(b => {
+    b.onclick = e => { e.stopPropagation(); onDelete(b.dataset.del); };
+  });
+  if (onMove) box.querySelectorAll('[data-mv]').forEach(b => {
+    b.onclick = e => { e.stopPropagation(); onMove(b.dataset.mv === '1' ? 1 : -1, b.closest('.thumb-wrap').querySelector('[data-img-id]').dataset.imgId, +b.closest('.thumb-wrap').dataset); };
+  });
+}
+// 由外部传入的移动回调真正需要的是 id，这里从 DOM 取（见上）；再补一层包装，简化调用
+function moveThumb(dir, id, setter) { setter(moveInArray(setter.value, dir, id)); }
+
+/* ---------- 从拖拽 / 剪贴板取图片文件 ---------- */
+function filesFromDataTransfer(dt) {
+  if (!dt) return [];
+  const out = [];
+  if (dt.items && dt.items.length) {
+    [...dt.items].forEach(it => {
+      if (it.kind === 'file') { const f = it.getAsFile(); if (f) out.push(f); }
+    });
+  }
+  if (!out.length && dt.files) [...dt.files].forEach(f => out.push(f));
+  return out.filter(f => f && f.type && f.type.startsWith('image/'));
+}
+function bindDropzone(el, onFiles) {
+  if (!el) return;
+  const over = e => { e.preventDefault(); e.stopPropagation(); el.classList.add('over'); };
+  ['dragenter', 'dragover'].forEach(ev => el.addEventListener(ev, over));
+  el.addEventListener('dragleave', () => el.classList.remove('over'));
+  el.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation();
+    el.classList.remove('over');
+    const fs = filesFromDataTransfer(e.dataTransfer);
+    if (!fs.length) return;
+    el.classList.add('pasted');
+    setTimeout(() => el.classList.remove('pasted'), 700);
+    onFiles(fs);
+  });
 }
 
-/* ---------- 图片查看 ---------- */
+/* ---------- 图片查看：多图翻页 + 缩放 + 旋转 + 拖动 ---------- */
 const lightbox = document.getElementById('lightbox');
 const lightboxImg = document.getElementById('lightboxImg');
-function openLightbox(src) {
-  lightboxImg.src = src;
+const lightboxStage = document.getElementById('lightboxStage');
+const lightboxBar = lightbox.querySelector('.lightbox-bar');
+const lbIndexEl = document.getElementById('lbIndex');
+const lb = { list: [], idx: 0, scale: 1, rot: 0, tx: 0, ty: 0, count: 0 };
+
+function lbApply() {
+  lightboxImg.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.scale}) rotate(${lb.rot}deg)`;
+  lightboxImg.classList.toggle('zoomed', lb.scale > 1.01);
+}
+function lbShow() {
+  const id = lb.list[lb.idx];
+  imgUrl(id).then(u => {
+    lightboxImg.src = u || '';
+    lightboxImg.style.display = u ? '' : 'none';
+  });
+  lbIndexEl.textContent = lb.list.length ? `图 ${lb.idx + 1} / ${lb.list.length}` : '';
+  const multi = lb.list.length > 1;
+  document.getElementById('lbPrev').disabled = !multi;
+  document.getElementById('lbNext').disabled = !multi;
+  lbApply();
+}
+function openLightbox(list, index) {
+  const arr = (list || []).filter(Boolean);
+  if (!arr.length) return;
+  lb.list = arr;
+  lb.idx = Math.max(0, Math.min(arr.length - 1, index || 0));
+  lb.scale = 1; lb.rot = 0; lb.tx = 0; lb.ty = 0;
+  lbShow();
   lightbox.classList.add('open');
 }
-document.getElementById('lightboxClose').onclick = () => lightbox.classList.remove('open');
-lightbox.onclick = e => { if (e.target === lightbox) lightbox.classList.remove('open'); };
+function lbGo(d) {
+  if (lb.list.length < 2) return;
+  lb.idx = (lb.idx + d + lb.list.length) % lb.list.length;
+  lb.scale = 1; lb.rot = 0; lb.tx = 0; lb.ty = 0;
+  lbShow();
+}
+function lbZoom(f) {
+  lb.scale = Math.max(0.25, Math.min(8, lb.scale * f));
+  lbApply();
+}
+function lbReset() { lb.scale = 1; lb.rot = 0; lb.tx = 0; lb.ty = 0; lbApply(); }
+function lbClose() {
+  lightbox.classList.remove('open');
+  lightboxImg.src = '';
+  lb.list = [];
+}
+document.getElementById('lightboxClose').onclick = lbClose;
+document.getElementById('lbPrev').onclick = () => lbGo(-1);
+document.getElementById('lbNext').onclick = () => lbGo(1);
+document.getElementById('lbZoomIn').onclick = () => lbZoom(1.25);
+document.getElementById('lbZoomOut').onclick = () => lbZoom(0.8);
+document.getElementById('lbRotate').onclick = () => { lb.rot = (lb.rot + 90) % 360; lbApply(); };
+document.getElementById('lbReset').onclick = lbReset;
+lightbox.onclick = e => { if (e.target === lightbox || e.target === lightboxStage) lbClose(); };
+lightboxStage.addEventListener('wheel', e => { e.preventDefault(); lbZoom(e.deltaY < 0 ? 1.12 : 0.9); }, { passive: false });
+
+let lbDrag = null;
+lightboxImg.addEventListener('pointerdown', e => {
+  lbDrag = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty, moved: false };
+  if (lightboxImg.setPointerCapture) { try { lightboxImg.setPointerCapture(e.pointerId); } catch (err) {} }
+});
+lightboxImg.addEventListener('pointermove', e => {
+  if (!lbDrag) return;
+  const dx = e.clientX - lbDrag.x, dy = e.clientY - lbDrag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 4) lbDrag.moved = true;
+  if (lbDrag.moved) { lb.tx = lbDrag.tx + dx; lb.ty = lbDrag.ty + dy; lbApply(); }
+});
+lightboxImg.addEventListener('pointerup', () => {
+  if (lbDrag && !lbDrag.moved) lbZoom(lb.scale > 1.01 ? 1 / lb.scale : 2);
+  lbDrag = null;
+});
+lightboxImg.addEventListener('pointercancel', () => { lbDrag = null; });
+
+function scopeImages(scope) {
+  return [...scope.querySelectorAll('img[data-img-id]')].map(x => x.dataset.imgId);
+}
+// 统一打开：找最近的「图片容器」以支持同一条目内多图翻页
+function openFromThumb(el, id) {
+  const scope = el.closest('.imgs, .thumbs, .cram-card, .pvi, #randomBody, .print-area') || document;
+  const ids = scopeImages(scope);
+  const hit = ids.indexOf(id);
+  openLightbox(ids.length ? ids : [id], hit >= 0 ? hit : 0);
+}
 document.addEventListener('click', e => {
   if (!e.target || !e.target.closest) return;
+  const fig = e.target.closest('.figref');
+  if (fig) {
+    const scope = fig.closest('.card, .cram-card, .pvi, #randomBody, .print-area') || document;
+    const ids = scopeImages(scope);
+    const hit = ids.indexOf(fig.dataset.fig);
+    openLightbox(ids.length ? ids : [fig.dataset.fig], hit >= 0 ? hit : 0);
+    return;
+  }
   const t = e.target.closest('img.thumb');
-  if (t && t.src) openLightbox(t.src);
+  if (t && t.dataset.imgId) openFromThumb(t, t.dataset.imgId);
+});
+
+/* ---------- 代码块「复制」按钮（委托绑定，无需内联事件） ---------- */
+document.addEventListener('click', e => {
+  if (!e.target || !e.target.closest) return;
+  const btn = e.target.closest('button[data-copy]');
+  if (!btn) return;
+  const wrap = btn.closest('.codewrap');
+  const pre = wrap && wrap.querySelector('pre.code');
+  if (!pre) return;
+  copyText(pre.innerText).then(ok => {
+    const old = btn.textContent;
+    btn.textContent = ok ? '已复制 ✓' : '复制失败';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  });
 });
 
 /* ---------- 回收站（软删除，30 天自动清理） ---------- */
@@ -291,10 +503,11 @@ function renderTrash() {
     const isK = t.kind === 'k';
     const title = isK ? (t.item.title || '（无名称）') : (t.item.stem || '（无题目）');
     const days = Math.floor((Date.now() - t.deletedAt) / 86400000);
+    const sub = SUBJECT_SHORT[t.item.subject] || '—';
     return `<div class="pvi">
-      <div class="section-label" style="margin-bottom:6px">${isK ? '知识点' : '错题'} · 删除于 ${days > 0 ? days + ' 天前' : '今天'}</div>
-      <div class="stem">${renderMath(title)}</div>
-      <div class="imgs">${(t.item.images || []).map(id => `<img class="thumb" data-img-id="${id}" alt="配图">`).join('')}</div>
+      <div class="section-label" style="margin-bottom:6px">${isK ? '知识点' : '错题'} · ${esc(sub)} · 删除于 ${days > 0 ? days + ' 天前' : '今天'}</div>
+      <div class="stem">${renderMath(title, t.item.images)}</div>
+      ${t.item.images && t.item.images.length ? `<div class="imgs">${t.item.images.map((id, k) => `<div class="thumb-wrap"><img class="thumb" data-img-id="${esc(id)}" alt="配图"><span class="thumb-num">图${k + 1}</span></div>`).join('')}</div>` : ''}
       <div class="row" style="margin-top:8px">
         <button data-restore="${i}">恢复</button>
         <button class="danger" data-purge="${i}">彻底删除</button>
@@ -345,7 +558,6 @@ function findDupIn(index, value) {
   }
   return best;
 }
-// 统计一批待导入项里，有多少与现有条目高度相似
 function countDups(kind, incoming) {
   const key = dupKey(kind);
   const index = buildDupIndex(kind);
@@ -378,14 +590,12 @@ async function idbKVPut(key, json) {
     tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
   });
 }
-// 读：IndexedDB 优先；IDB 不可用时读 localStorage
 async function kvGet(key) {
   try {
     const rec = await idbKVGet(key);
     return rec === undefined ? undefined : JSON.parse(rec.json);
   } catch (e) { return lsRead(key); }
 }
-// 写：IndexedDB 优先；失败回退 localStorage；两者都失败才提示
 async function persist(key, val) {
   try {
     await idbKVPut(key, JSON.stringify(val));
@@ -397,23 +607,84 @@ async function persist(key, val) {
     return false;
   }
 }
-// 沿用 saveStore 名字：触发异步写入，不阻塞 UI
 function saveStore(key, list) { return persist(key, list); }
 
+/* ===================== 种子数据（S&S / DSP 各两条例） ===================== */
 function seedQuestions() {
   const now = Date.now();
   return [
     {
-      id: uid(), status: 'new', tags: ['二次函数', '最值'], createdAt: now, updatedAt: now,
-      stem: '求函数 $f(x)=x^{2}-2x+1$ 的最小值，并指出取最小值时 $x$ 的取值。',
-      analysis: '配方得 $f(x)=(x-1)^{2}$。因为 $(x-1)^{2}\\ge 0$，所以最小值为 $0$，当且仅当 $x=1$ 时取得。',
-      knowledge: '二次函数顶点式 $y=a(x-h)^{2}+k$，顶点为 $(h,k)$。当 $a>0$ 时开口向上，顶点处取最小值。易错点：忘记验证取等条件。',
+      id: uid(), subject: 'ss', status: 'new', tags: ['卷积', '阶跃信号', '因果系统'],
+      createdAt: now, updatedAt: now,
+      stem: '设 $x(t)=\\mathrm{u}(t)-\\mathrm{u}(t-2)$，$h(t)=e^{-t}\\mathrm{u}(t)$，求卷积 $y(t)=x(t)*h(t)$。',
+      analysis: [
+        '$y(t)=\\int_{-\\infty}^{\\infty}x(\\tau)h(t-\\tau)\\,d\\tau$，其中 $h(t-\\tau)=e^{-(t-\\tau)}\\mathrm{u}(t-\\tau)$。',
+        '当 $0<t<2$ 时：$y(t)=\\int_{0}^{t}e^{-(t-\\tau)}d\\tau=1-e^{-t}$；',
+        '当 $t\\ge 2$ 时：$y(t)=\\int_{0}^{2}e^{-(t-\\tau)}d\\tau=e^{-t}(e^{2}-1)$；',
+        '$t<0$ 时 $y(t)=0$。',
+      ].join('\n'),
+      knowledge: '卷积积分“翻褶—平移—相乘—积分”四步法；含 $\mathrm{u}$ 的因果信号相乘时，要注意两个阶跃函数共同限定的积分区间（分段点由分段信号边界给出）。',
+      code: [
+        't = linspace(-1, 6, 400);',
+        'x = double(t>=0 & t<2);',
+        'h = exp(-t).*double(t>=0);',
+        'dt = t(2)-t(1);',
+        'y = conv(x, h) * dt;            % 数值卷积',
+        'ty = t(1) + (0:length(y)-1) * dt;',
+        'plot(ty, y); grid on; xlabel(\'t\'); ylabel(\'y(t)\');',
+      ].join('\n'),
+      myAnswer: '',
     },
     {
-      id: uid(), status: 'reviewing', tags: ['导数', '单调性'], createdAt: now, updatedAt: now,
-      stem: "已知 $f(x)=x^{3}-3x$，求 $f(x)$ 的单调递增区间。",
-      analysis: "求导得 $f'(x)=3x^{2}-3=3(x-1)(x+1)$。令 $f'(x)>0$，解得 $x<-1$ 或 $x>1$，故单调递增区间为 $(-\\infty,-1)$ 与 $(1,+\\infty)$。",
-      knowledge: "用导数判断单调性：$f'(x)>0$ 的区间上 $f$ 递增，$f'(x)<0$ 的区间上递减。易错点：区间端点是否可取、以及导数为零的点。",
+      id: uid(), subject: 'ss', status: 'reviewing', tags: ['拉普拉斯变换', '稳定性', '零极点'],
+      createdAt: now, updatedAt: now,
+      stem: '某因果 LTI 系统 $H(s)=\\dfrac{s+2}{s^{2}+2s+5}$，判断系统是否稳定，并说明理由。',
+      analysis: [
+        '分母 $s^{2}+2s+5=0$ 的根为 $s=-1\\pm 2j$，两个极点实部均为 $-1<0$。',
+        '因果系统稳定的判据：所有极点位于 $s$ 左半平面。',
+        '此处全部极点实部为负，故系统**稳定**（收敛域 $\\mathrm{Re}\\{s\\}>-1$，包含虚轴）。',
+      ].join('\n'),
+      knowledge: '因果系统稳定 ⟺ 全部极点位于左半平面（连续）/ 单位圆内（离散）。收敛域包含虚轴（$j\\omega$ 轴）即稳定；因果性要求收敛域在极点最右侧。',
+      code: [
+        'num = [1 2]; den = [1 2 5];',
+        'zpk(tf(num, den))              % 极点 -1±2i，实部为负',
+      ].join('\n'),
+      myAnswer: '',
+    },
+    {
+      id: uid(), subject: 'dsp', status: 'new', tags: ['Z变换', '收敛域', '几何序列'],
+      createdAt: now, updatedAt: now,
+      stem: '求序列 $x[n]=0.8^{\\,n}\\mathrm{u}[n]$ 的 Z 变换 $X(z)$ 与收敛域。',
+      analysis: [
+        '$X(z)=\\sum_{n=0}^{\\infty}0.8^{n}z^{-n}=\\sum_{n=0}^{\\infty}(0.8z^{-1})^{n}$。',
+        '当 $|0.8z^{-1}|<1$ 即 $|z|>0.8$ 时级数收敛，得',
+        '$X(z)=\\dfrac{1}{1-0.8z^{-1}}=\\dfrac{z}{z-0.8}$，收敛域 $|z|>0.8$。',
+      ].join('\n'),
+      knowledge: '几何序列对：$a^{n}\\mathrm{u}[n]\\leftrightarrow\\dfrac{z}{z-a}$（$|z|>|a|$）。极点在 $z=a$，收敛域为极点外侧；因果序列的收敛域总是某圆外区域。',
+      code: [
+        'n = 0:20;',
+        'x = 0.8.^n;',
+        'stem(n, x); grid on; xlabel(\'n\'); ylabel(\'x[n]\');',
+      ].join('\n'),
+      myAnswer: '',
+    },
+    {
+      id: uid(), subject: 'dsp', status: 'reviewing', tags: ['DFT', '频谱', 'FFT'],
+      createdAt: now, updatedAt: now,
+      stem: '对 8 点序列 $x[n]=\\{1,1,1,1,0,0,0,0\\}$ 求 8 点 DFT 的幅度谱，并说明它和 DTFT 的关系。',
+      analysis: [
+        '$X[k]=\\sum_{n=0}^{7}x[n]e^{-j2\\pi kn/8}=\\sum_{n=0}^{3}e^{-j2\\pi kn/8}$。',
+        '当 $k=0$ 时 $X[0]=4$；$k\\neq 0$ 时为有限等比和，$|X[k]|=\\left|\\dfrac{\\sin(\\pi k/2)}{\\sin(\\pi k/8)}\\right|$。',
+        '$X[k]$ 是 DTFT $X(e^{j\\omega})$ 在 $\\omega=2\\pi k/8$ 上的 $N$ 点等间隔采样。',
+      ].join('\n'),
+      knowledge: 'N 点 DFT 是 DTFT 在 $[0,2\\pi)$ 上的 N 点等间隔取样：$X[k]=X(e^{j\\omega})\\big|_{\\omega=2\\pi k/N}$。补零只能加密取样点（谱更“光滑”），**不提高真实分辨率**；真实分辨率由观测时长决定。',
+      code: [
+        'x = [1 1 1 1 0 0 0 0];',
+        'X = fft(x);',
+        'k = (0:7);',
+        'stem(k, abs(X)); grid on; xlabel(\'k\'); ylabel(\'|X[k]|\');',
+      ].join('\n'),
+      myAnswer: '',
     },
   ];
 }
@@ -422,14 +693,46 @@ function seedKps() {
   const now = Date.now();
   return [
     {
-      id: uid(), status: 'new', tags: ['函数', '二次函数'], createdAt: now, updatedAt: now,
-      title: '二次函数顶点式',
-      content: '把二次函数写成 $y=a(x-h)^{2}+k$ 的形式，顶点坐标为 $(h,k)$。当 $a>0$ 时开口向上，顶点处取最小值；当 $a<0$ 时开口向下，顶点处取最大值。\n易错点：配方时符号容易出错；取最值要验证取等条件。',
+      id: uid(), subject: 'ss', status: 'new', tags: ['抽样定理', '频谱混叠'],
+      createdAt: now, updatedAt: now,
+      title: '抽样定理（奈奎斯特）',
+      content: [
+        '若 $x(t)$ 为带限信号，最高频率为 $f_m$，当抽样频率',
+        '$$f_s>2f_m$$',
+        '时，可由样值序列无失真地恢复原信号；否则发生**频谱混叠**。',
+        '恢复：理想低通滤波，截止频率取 $f_m<f_c<f_s-f_m$。',
+        '注意：抽样在频域表现为频谱以 $\\omega_s=2\\pi f_s$ 为周期延拓。',
+      ].join('\n'),
     },
     {
-      id: uid(), status: 'reviewing', tags: ['导数', '单调性'], createdAt: now, updatedAt: now,
-      title: '用导数判断单调性',
-      content: '$f\'(x)>0$ 的区间上 $f$ 单调递增，$f\'(x)<0$ 的区间上单调递减。\n步骤：求导 → 解 $f\'(x)=0$ → 列表判断各区间导数符号。\n易错点：单调区间端点是否可取；导数不存在的点要单独讨论。',
+      id: uid(), subject: 'ss', status: 'reviewing', tags: ['卷积定理', '变换性质'],
+      createdAt: now, updatedAt: now,
+      title: '卷积定理与时域↔频域对偶',
+      content: [
+        '时域卷积 $x(t)*h(t)\\leftrightarrow X(j\\omega)H(j\\omega)$；',
+        '时域相乘 $x(t)h(t)\\leftrightarrow\\dfrac{1}{2\\pi}X(j\\omega)*H(j\\omega)$。',
+        '应用：LTI 系统 $Y(j\\omega)=X(j\\omega)H(j\\omega)$（相乘），理想滤波即频域取窗；调制即频域搬移。',
+      ].join('\n'),
+    },
+    {
+      id: uid(), subject: 'dsp', status: 'new', tags: ['Z变换', '稳定性', '单位圆'],
+      createdAt: now, updatedAt: now,
+      title: '单位圆与因果稳定判据',
+      content: [
+        'Z 变换在 $z=e^{j\\omega}$（单位圆）上取值即 DTFT $X(e^{j\\omega})$。',
+        '因果系统稳定 ⟺ 全部极点在单位圆内（$|z|<1$）；此时收敛域包含单位圆。',
+        '频率响应 $H(e^{j\\omega})$ 可看作 $z$ 平面单位圆上的取值，极点靠近单位圆→该频率处出现峰值。',
+      ].join('\n'),
+    },
+    {
+      id: uid(), subject: 'dsp', status: 'new', tags: ['DTFT', 'DFT', '频率分辨率'],
+      createdAt: now, updatedAt: now,
+      title: 'DFT 与加窗、补零的区别',
+      content: [
+        '对有限长序列取 N 点 DFT，相当于在频域对 DTFT 等间隔取样。',
+        '**加窗**：把无限长（或长）序列截断为 N 点，频域被窗谱卷积 → 产生拖尾/泄漏，真实分辨率由窗主瓣宽度（≈ 观测时长）决定。',
+        '**补零**：只在频率轴上加密取样点，让曲线更连贯，**不改变真实分辨率**。',
+      ].join('\n'),
     },
   ];
 }
@@ -444,13 +747,13 @@ async function loadInitial() {
   for (const kind of ['q', 'k']) {
     const key = stores[kind].key;
     let raw = await kvGet(key);
-    if (!Array.isArray(raw)) raw = lsRead(key); // IDB 无记录时，检查旧版 localStorage
+    if (!Array.isArray(raw)) raw = lsRead(key);
     if (Array.isArray(raw)) {
       stores[kind].items = raw.map(stores[kind].norm);
     } else {
       stores[kind].items = (kind === 'q' ? seedQuestions() : seedKps()).map(stores[kind].norm);
     }
-    await persist(key, stores[kind].items); // 迁移或首次种子都落盘
+    await persist(key, stores[kind].items);
   }
   let t = await kvGet(K_TRASH);
   if (!Array.isArray(t)) t = lsRead(K_TRASH);
@@ -464,19 +767,44 @@ const DEF = {
     addLabel: '+ 新增错题',
     randomLabel: '随机一题',
     overviewTitle: '随机一题 · 先自己想，再展开',
-    fieldLabels: { stem: '题目（公式用 $...$）', analysis: '解析', knowledge: '知识点讲解', myAnswer: '我的错误答案（可选）' },
-    importFieldMap: { 题目: 'stem', 解析: 'analysis', 知识点: 'knowledge', 我的错误答案: 'myAnswer', 标签: 'tags' },
+    fieldLabels: {
+      stem: '题目（公式用 $...$）',
+      analysis: '解析',
+      knowledge: '知识点讲解',
+      code: '代码（MATLAB / Python，可选）',
+      myAnswer: '我的错误答案（可选）',
+    },
+    importFieldMap: { 题目: 'stem', 解析: 'analysis', 知识点: 'knowledge', 代码: 'code', 我的错误答案: 'myAnswer', 标签: 'tags' },
     importRequired: '题目',
-    importExample: '【题目】\n求函数 $f(x)=x^2-2x+1$ 的最小值。\n【解析】\n配方得 $f(x)=(x-1)^2$，故最小值为 $0$，在 $x=1$ 处取得。\n【知识点】\n二次函数顶点式 $y=a(x-h)^2+k$，顶点为 $(h,k)$。\n【我的错误答案】\n（选填：我当时是怎么错的）\n【标签】\n二次函数, 最值\n\n多题之间用单独一行 === 分隔',
-    main: it => `<div class="stem">${renderMath(it.stem)}</div>`,
+    importExample: [
+      '【题目】',
+      '已知 $x(t)=e^{-2t}\\mathrm{u}(t)$，求其傅里叶变换 $X(j\\omega)$。',
+      '（可以写 [图1] 引用配图，解析里会显示成可点击的图号）',
+      '【解析】',
+      '$$X(j\\omega)=\\int_{-\\infty}^{\\infty}x(t)e^{-j\\omega t}\\,dt=\\int_{0}^{\\infty}e^{-2t}e^{-j\\omega t}\\,dt=\\frac{1}{2+j\\omega}$$',
+      '【知识点】',
+      '单边指数信号：$e^{-at}\\mathrm{u}(t)\\leftrightarrow\\frac{1}{a+j\\omega}$，收敛条件 $\\mathrm{Re}\\{a\\}>0$。',
+      '【代码】',
+      't = 0:0.005:3;',
+      'x = exp(-2*t);',
+      'plot(t, x); grid on; xlabel(\'t\'); ylabel(\'x(t)\');',
+      '【我的错误答案】',
+      '（选填：我当时是怎么错的）',
+      '【标签】',
+      '傅里叶变换, 单边指数, 收敛域',
+      '',
+      '多题之间用单独一行 === 分隔',
+    ].join('\n'),
+    main: it => `<div class="stem">${renderMath(it.stem, it.images)}</div>`,
     details: it => [
       { label: '查看我的错误答案', text: it.myAnswer || '' },
       { label: '查看解析', text: it.analysis },
       { label: '查看知识点讲解', text: it.knowledge },
+      { label: '查看代码', text: it.code, code: true },
     ],
-    hay: it => [it.stem, it.analysis, it.knowledge, it.myAnswer || '', it.tags.join(' ')].join(' '),
+    hay: it => [it.stem, it.analysis, it.knowledge, it.myAnswer || '', it.code || '', it.tags.join(' ')].join(' '),
     previewMain: o => o.stem || '（无题目）',
-    previewInfo: o => `解析 ${o.analysis ? '✓' : '✗'} · 知识点 ${o.knowledge ? '✓' : '✗'} · 标签 ${o.tags.length}`,
+    previewInfo: o => `解析 ${o.analysis ? '✓' : '✗'} · 知识点 ${o.knowledge ? '✓' : '✗'} · 代码 ${o.code ? '✓' : '✗'} · 标签 ${o.tags.length}`,
   },
   k: {
     noun: '个知识点',
@@ -486,8 +814,17 @@ const DEF = {
     fieldLabels: { title: '知识点名称', content: '讲解（公式用 $...$）' },
     importFieldMap: { 知识点: 'title', 讲解: 'content', 标签: 'tags' },
     importRequired: '知识点',
-    importExample: '【知识点】\n二次函数顶点式\n【讲解】\n$y=a(x-h)^2+k$，顶点为 $(h,k)$，$a>0$ 时开口向上。\n【标签】\n函数, 二次函数\n\n多个知识点之间用单独一行 === 分隔',
-    main: it => `<div class="stem"><span class="kp-badge">知识点</span>${renderMath(it.title)}</div>`,
+    importExample: [
+      '【知识点】',
+      '抽样定理',
+      '【讲解】',
+      '若 $x(t)$ 为带限信号（最高频率 $f_m$），抽样频率须满足 $f_s>2f_m$，否则发生频谱混叠。',
+      '【标签】',
+      '抽样定理, 频谱混叠',
+      '',
+      '多个知识点之间用单独一行 === 分隔',
+    ].join('\n'),
+    main: it => `<div class="stem"><span class="kp-badge">知识点</span>${renderMath(it.title, it.images)}</div>`,
     details: it => [{ label: '查看讲解', text: it.content }],
     hay: it => [it.title, it.content, it.tags.join(' ')].join(' '),
     previewMain: o => o.title || '（无名称）',
@@ -495,14 +832,89 @@ const DEF = {
   },
 };
 
+/* ===================== 公式快捷插入条 ===================== */
+const LATEX_SNIPPETS = [
+  ['分式', '\\frac{a}{b}'],
+  ['积分', '\\int_{-\\infty}^{\\infty} '],
+  ['求和', '\\sum_{n=-\\infty}^{\\infty} '],
+  ['冲激', '\\delta(t)'],
+  ['阶跃', '\\mathrm{u}(t)'],
+  ['矩形', '\\mathrm{rect}(t)'],
+  ['sinc', '\\mathrm{sinc}(x)'],
+  ['复指数', 'e^{j\\omega t}'],
+  ['频域', 'X(j\\omega)'],
+  ['H(z)', 'H(z)=\\frac{1}{1-az^{-1}}'],
+  ['对应', '\\leftrightarrow'],
+  ['卷积', '*'],
+  ['ω', '\\omega'],
+  ['上标', '^{}'],
+  ['下标', '_{}'],
+  ['矩阵', '\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}'],
+];
+function insertAtCursor(el, text) {
+  const start = el.selectionStart == null ? el.value.length : el.selectionStart;
+  const end = el.selectionEnd == null ? start : el.selectionEnd;
+  el.value = el.value.slice(0, start) + text + el.value.slice(end);
+  const pos = start + text.length;
+  el.focus();
+  try { el.setSelectionRange(pos, pos); } catch (e) {}
+}
+function buildLatexBar(bar) {
+  if (!bar || bar.dataset.built) return;
+  bar.dataset.built = '1';
+  bar.innerHTML = '<span class="lb-hint">插入：</span>' + LATEX_SNIPPETS
+    .map((s, i) => `<button type="button" data-ltx="${i}" title="${esc(s[1])}">${esc(s[0])}</button>`).join('');
+  bar.querySelectorAll('button[data-ltx]').forEach(b => {
+    b.onclick = () => {
+      const panel = bar.closest('.panel');
+      const snip = LATEX_SNIPPETS[+b.dataset.ltx][1];
+      let target = null;
+      const focused = document.activeElement;
+      if (focused && panel && panel.contains(focused) && /^(TEXTAREA|INPUT)$/.test(focused.tagName)) target = focused;
+      if (!target && panel) target = panel.querySelector('textarea');
+      if (target) insertAtCursor(target, snip);
+    };
+  });
+}
+buildLatexBar(document.getElementById('latexBar'));
+buildLatexBar(document.getElementById('latexBarEdit'));
+
+/* ===================== 学科预设标签 ===================== */
+const PRESET_TAGS = {
+  ss: {
+    '基本信号': ['单位冲激', '单位阶跃', '冲激偶', '复指数信号', 'Sa 函数', '矩形脉冲', '三角脉冲', '符号函数'],
+    '变换': ['傅里叶级数', '傅里叶变换', '拉普拉斯变换', '频谱', '幅度谱', '相位谱', '收敛域', '变换性质'],
+    '系统': ['线性时不变', '因果', '稳定', '卷积', '冲激响应', '阶跃响应', '系统函数', '零极点', '频率响应', '全通', '无失真传输'],
+    '应用': ['抽样定理', '频谱混叠', '调制', '滤波器', '微分方程', '状态方程', '信号分解'],
+  },
+  dsp: {
+    '基本序列': ['单位脉冲序列', '单位阶跃序列', '指数序列', '复指数序列', '周期序列', '序列运算'],
+    '变换': ['DTFT', 'DFT', 'FFT', 'Z变换', '循环卷积', '线性卷积', '频谱泄漏', '频率分辨率'],
+    '系统': ['线性移不变', '因果稳定', '差分方程', '系统函数', '零极点', '频率响应', '全通', '最小相位', 'IIR', 'FIR'],
+    '实现': ['采样', '抽取', '内插', '多速率', '窗函数', 'DFT 对称性', 'FFT 算法'],
+  },
+};
+function presetTagsHTML(subject) {
+  const groups = PRESET_TAGS[subject] || {};
+  return Object.keys(groups).map(g => `
+    <div class="preset-group">${esc(g)}</div>
+    <div class="preset-tags">${groups[g].map(t => `<button type="button" class="preset-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('')}</div>
+  `).join('');
+}
+function paintPresetState(box, isOn) {
+  box.querySelectorAll('.preset-tag').forEach(b => b.classList.toggle('on', isOn(b.dataset.tag)));
+}
+
+/* ===================== 视图状态 ===================== */
 const PAGE = 30;
 const views = {
-  q: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false },
-  k: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false },
+  q: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false, imgOnly: false, codeOnly: false },
+  k: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false, imgOnly: false, codeOnly: false },
 };
 let active = 'q';
 let editingId = null;
 let pending = [];
+let pendingTags = new Set();
 let pendingAnim = false;
 // 记录已展开的折叠区（键为 `itemId|label`），使重渲染后不丢失展开状态
 const openDetails = new Set();
@@ -510,15 +922,27 @@ const openDetails = new Set();
 const cur = () => views[active];
 const curItems = () => stores[active].items;
 const saveActive = () => saveStore(stores[active].key, curItems());
+const curSubjectName = () => SUBJECT[settings.subject] || '';
+const curSubjectShort = () => SUBJECT_SHORT[settings.subject] || '';
 
 /* ===================== render ===================== */
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-function renderMath(text) {
+// 把正文里的 [图1]、[图 2] 变成可点击的图号（与配图编号一一对应）
+function figRefs(html, images) {
+  return html.replace(/\[图\s*(\d+)\]/g, (all, n) => {
+    const idx = (+n) - 1;
+    const id = images && images[idx];
+    if (!id) return all;
+    return `<span class="figref" data-fig="${esc(id)}" data-figidx="${idx}">图${n}</span>`;
+  });
+}
+
+function renderMath(text, images) {
   if (!text) return '';
-  const parts = text.split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g);
+  const parts = String(text).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g);
   return parts.map(p => {
     let m;
     if ((m = p.match(/^\$\$([\s\S]+?)\$\$$/))) {
@@ -529,8 +953,15 @@ function renderMath(text) {
       try { return katex.renderToString(m[1], { throwOnError: false }); }
       catch (e) { return esc(p); }
     }
-    return esc(p).replace(/\n/g, '<br>');
+    return figRefs(esc(p), images).replace(/\n/g, '<br>');
   }).join('');
+}
+
+// 折叠区内容：代码段用高亮块，其余走公式渲染
+function sectionHTML(x, images) {
+  if (!x.text) return `<span class="section-label">${esc(x.empty || '（暂无）')}</span>`;
+  if (x.code) return MQC.codeBlockHTML ? MQC.codeBlockHTML(x.text) : `<pre class="code">${esc(x.text)}</pre>`;
+  return renderMath(x.text, images);
 }
 
 const listEl = document.getElementById('list');
@@ -540,6 +971,7 @@ const statusEl = document.getElementById('statusFilter');
 const loadMoreRow = document.getElementById('loadMoreRow');
 const addBtn = document.getElementById('addBtn');
 const randomBtn = document.getElementById('randomBtn');
+const subjectSeg = document.getElementById('subjectSeg');
 const tabEls = [...document.querySelectorAll('.tab')];
 
 // 搜索文本缓存：按 id + updatedAt 命中，避免每次筛选重新拼接
@@ -557,13 +989,19 @@ function currentFiltered() {
   const s = parseSearch(v.search);
   const now = Date.now();
   const out = curItems().filter(it => {
+    if (it.subject !== settings.subject) return false;
     if (v.status && it.status !== v.status) return false;
     if (s.status && it.status !== s.status) return false;
     if (v.starOnly && !it.star) return false;
     if (s.star && !it.star) return false;
     if (v.dueOnly && !isDue(it, now)) return false;
     if (s.due && !isDue(it, now)) return false;
-    // 标签筛选：默认「同时满足全部（交集）」；由「相关 X 个」跳转时改为「满足其一（并集）」，与计数口径一致
+    const hasImg = !!(it.images && it.images.length);
+    if (v.imgOnly && !hasImg) return false;
+    if (s.hasImg && !hasImg) return false;
+    if (v.codeOnly && !it.code) return false;
+    if (s.hasCode && !it.code) return false;
+    // 标签筛选：默认「同时满足全部（交集）」；由「相关 X 个」跳转时改为「满足其一（并集）」
     if (v.activeTags.size) {
       const hit = v.tagMode === 'any'
         ? [...v.activeTags].some(t => it.tags.includes(t))
@@ -578,11 +1016,11 @@ function currentFiltered() {
   return out;
 }
 
-function bindLazy(detailsEl, key, text, emptyLabel) {
+function bindLazy(detailsEl, key, sec, images) {
   const body = detailsEl.querySelector('.body');
   const paint = () => {
     if (body.dataset.done === '1') return;
-    body.innerHTML = text ? renderMath(text) : `<span class="section-label">${emptyLabel}</span>`;
+    body.innerHTML = sectionHTML(sec, images);
     body.dataset.done = '1';
   };
   if (detailsEl.open) paint();
@@ -592,11 +1030,11 @@ function bindLazy(detailsEl, key, text, emptyLabel) {
   });
 }
 
-// 与「另一库」按标签交集的数量：错题视图看知识点，知识点视图看错题
+// 与「另一库」按标签交集的数量（同一科目内）：错题视图看知识点，知识点视图看错题
 function relatedCount(it) {
   if (!it.tags.length) return 0;
   const other = active === 'k' ? stores.q.items : stores.k.items;
-  return other.filter(o => o.tags.some(t => it.tags.includes(t))).length;
+  return other.filter(o => o.subject === settings.subject && o.tags.some(t => it.tags.includes(t))).length;
 }
 
 // 统一的复习动作：切换状态并安排下次复习时间（SRS）
@@ -605,6 +1043,15 @@ function applyStatus(item, next) {
   item.updatedAt = Date.now();
   scheduleSrs(item, next);
   saveActive();
+}
+
+// 折叠区：过滤掉空内容（空「我的错误答案」、空「代码」不显示）
+function visibleSections(it) {
+  return DEF[active].details(it).filter(x => {
+    if (x.label === '查看我的错误答案') return !!x.text;
+    if (x.label === '查看代码') return !!x.text;
+    return true;
+  });
 }
 
 function makeCard(it) {
@@ -618,8 +1065,7 @@ function makeCard(it) {
   const rel = rc
     ? `<span class="relchip" data-rel="1">相关${active === 'k' ? '错题' : '知识点'} ${rc} ${active === 'k' ? '道' : '个'}</span>` : '';
   const due = `<span class="duechip${isDue(it) ? ' due' : ''}" data-due="1" title="点击标记为「复习中」">🕒 ${dueLabel(it)}</span>`;
-  // 「我的错误答案」为空时不显示该折叠区，避免噪音
-  const dets = d.details(it).filter(x => x.label !== '查看我的错误答案' || x.text);
+  const dets = visibleSections(it);
   card.innerHTML = `
     ${v.selectMode ? `<input type="checkbox" class="chk" data-act="pick" ${v.selected.has(it.id) ? 'checked' : ''}>` : ''}
     ${d.main(it)}
@@ -639,7 +1085,7 @@ function makeCard(it) {
       return `<details data-key="${esc(key)}"${openDetails.has(key) ? ' open' : ''}><summary>${x.label}</summary><div class="body"></div></details>`;
     }).join('')}
   `;
-  card.querySelectorAll('details').forEach((el, i) => bindLazy(el, it.id + '|' + dets[i].label, dets[i].text, '（暂无）'));
+  card.querySelectorAll('details').forEach((el, i) => bindLazy(el, it.id + '|' + dets[i].label, dets[i], it.images));
 
   card.querySelector('[data-act="status"]').onclick = () => {
     applyStatus(it, STATUS_NEXT[it.status]);
@@ -648,7 +1094,6 @@ function makeCard(it) {
     el.textContent = '● ' + STATUS[it.status];
     const dueEl = card.querySelector('[data-due]');
     if (dueEl) { dueEl.textContent = '🕒 ' + dueLabel(it); dueEl.classList.toggle('due', isDue(it)); }
-    // 状态筛选 / 待复习筛选生效时，列表组成会变化，需要整体重渲染
     if (v.status || v.dueOnly) render();
   };
   card.querySelector('[data-act="star"]').onclick = () => {
@@ -688,6 +1133,8 @@ function makeCard(it) {
     ov.status = '';
     ov.starOnly = false;
     ov.dueOnly = false;
+    ov.imgOnly = false;
+    ov.codeOnly = false;
     ov.selectMode = false;
     ov.selected.clear();
     switchView(other);
@@ -716,11 +1163,11 @@ function render() {
   const v = cur();
   const filtered = currentFiltered();
   const shown = filtered.slice(0, v.visibleCount);
-  countEl.textContent = `共 ${curItems().length} ${DEF[active].noun}，筛选出 ${filtered.length}，已显示 ${shown.length}`;
+  countEl.textContent = `【${curSubjectName()}】共 ${curItems().filter(i => i.subject === settings.subject).length} ${DEF[active].noun}，筛选出 ${filtered.length}，已显示 ${shown.length}`;
   listEl.innerHTML = '';
 
   if (!filtered.length) {
-    listEl.innerHTML = `<div class="empty">还没有内容。点右上角「${DEF[active].addLabel}」粘贴一段试试。</div>`;
+    listEl.innerHTML = `<div class="empty">这个科目下还没有内容。点右上角「${DEF[active].addLabel}」粘贴一段试试。</div>`;
     loadMoreRow.style.display = 'none';
     pendingAnim = false;
     updateToolbar();
@@ -767,9 +1214,12 @@ function updateToolbar() {
   document.getElementById('selCount').textContent = `已选 ${v.selected.size} 项`;
 }
 
-/* ===================== 标签（两库并集） ===================== */
+/* ===================== 标签（两库并集，限定当前科目） ===================== */
 function allTags() {
-  return [...new Set([...stores.q.items, ...stores.k.items].flatMap(i => i.tags))].sort();
+  const sub = settings.subject;
+  return [...new Set([...stores.q.items, ...stores.k.items]
+    .filter(i => i.subject === sub)
+    .flatMap(i => i.tags))].sort();
 }
 
 function refreshTagPicker() {
@@ -782,10 +1232,10 @@ function refreshTagPicker() {
     : '';
   menu.innerHTML = clearRow + note + (tags.length
     ? tags.map(t => `<label class="tagopt"><input type="checkbox" value="${esc(t)}" ${v.activeTags.has(t) ? 'checked' : ''}> ${esc(t)}</label>`).join('')
-    : '<div class="tagopt" style="color:var(--muted)">暂无标签</div>');
+    : `<div class="tagopt" style="color:var(--muted)">「${esc(curSubjectName())}」下暂无标签</div>`);
   menu.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.onchange = () => {
-      v.tagMode = 'all';         // 手动勾选时回到交集语义
+      v.tagMode = 'all';
       cb.checked ? v.activeTags.add(cb.value) : v.activeTags.delete(cb.value);
       refreshTagPicker();
       applyFilters();
@@ -797,11 +1247,6 @@ function refreshTagPicker() {
 }
 
 /* ===================== ui ===================== */
-function debounce(fn, ms) {
-  let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
-}
-
 function applyFilters() {
   cur().visibleCount = PAGE;
   cur().selected.clear();
@@ -821,9 +1266,13 @@ function syncHeader() {
   const db = document.getElementById('dueBtn');
   if (db) {
     db.classList.toggle('on', v.dueOnly);
-    const dueN = curItems().filter(it => isDue(it)).length;
+    const dueN = curItems().filter(it => it.subject === settings.subject && isDue(it)).length;
     db.textContent = dueN ? `🕒 待复习 ${dueN}` : '🕒 待复习';
   }
+  const ib = document.getElementById('imgOnlyBtn');
+  if (ib) ib.classList.toggle('primary', v.imgOnly);
+  const cb = document.getElementById('codeOnlyBtn');
+  if (cb) cb.classList.toggle('primary', v.codeOnly);
 }
 
 function switchView(v) {
@@ -836,6 +1285,31 @@ function switchView(v) {
   pendingAnim = true;
   render();
 }
+
+function switchSubject(sub) {
+  if (!SUBJECT[sub] || sub === settings.subject) return;
+  settings.subject = sub;
+  saveSettings();
+  applySettings();
+  for (const kind of ['q', 'k']) {
+    views[kind].visibleCount = PAGE;
+    views[kind].selected.clear();
+    views[kind].activeTags.clear();
+    views[kind].search = '';
+    views[kind].status = '';
+    views[kind].starOnly = false;
+    views[kind].dueOnly = false;
+    views[kind].imgOnly = false;
+    views[kind].codeOnly = false;
+    views[kind].selectMode = false;
+  }
+  syncHeader();
+  refreshTagPicker();
+  pendingAnim = true;
+  render();
+}
+
+subjectSeg.querySelectorAll('button').forEach(b => b.onclick = () => switchSubject(b.dataset.subject));
 
 tabEls.forEach(t => t.onclick = () => switchView(t.dataset.view));
 searchEl.oninput = debounce(() => { cur().search = searchEl.value; applyFilters(); }, 200);
@@ -885,6 +1359,20 @@ document.getElementById('dueBtn').onclick = () => {
   applyFilters();
 };
 
+document.getElementById('imgOnlyBtn').onclick = () => {
+  const v = cur();
+  v.imgOnly = !v.imgOnly;
+  syncHeader();
+  applyFilters();
+};
+
+document.getElementById('codeOnlyBtn').onclick = () => {
+  const v = cur();
+  v.codeOnly = !v.codeOnly;
+  syncHeader();
+  applyFilters();
+};
+
 /* ---------- 批量操作 ---------- */
 document.getElementById('selAll').onclick = () => {
   const v = cur();
@@ -923,6 +1411,18 @@ document.getElementById('batchTag').onclick = () => {
   refreshTagPicker();
   render();
 };
+document.getElementById('batchSubject').onclick = () => {
+  const v = cur();
+  if (!v.selected.size) return alert('还没选任何项。');
+  const other = settings.subject === 'ss' ? 'dsp' : 'ss';
+  if (!confirm(`把选中的 ${v.selected.size} 项改到「${SUBJECT[other]}」（${SUBJECT_SHORT[other]}）？改后它们会从当前列表里消失。`)) return;
+  curItems().forEach(it => {
+    if (v.selected.has(it.id)) { it.subject = other; it.updatedAt = Date.now(); }
+  });
+  saveActive();
+  refreshTagPicker();
+  render();
+};
 document.getElementById('batchDelete').onclick = () => {
   const v = cur();
   if (!v.selected.size) return alert('还没选任何项。');
@@ -944,12 +1444,14 @@ const addImgRow = document.getElementById('addImgRow');
 /* 导入时临时配图（只有解析出 1 项时可用） */
 let pendingImgs = [];
 function renderPendingThumbs() {
-  renderThumbs(document.getElementById('addThumbs'), pendingImgs, id => {
-    pendingImgs = pendingImgs.filter(x => x !== id);
-    dropImage(id);
-    document.getElementById('addImgMsg').textContent = '';
-    renderPendingThumbs();
-  });
+  renderThumbs(document.getElementById('addThumbs'), pendingImgs,
+    id => {
+      pendingImgs = pendingImgs.filter(x => x !== id);
+      dropImage(id);
+      document.getElementById('addImgMsg').textContent = '';
+      renderPendingThumbs();
+    },
+    (dir, id) => { pendingImgs = moveInArray(pendingImgs, dir, id); renderPendingThumbs(); });
 }
 function resetPendingImgs() {
   pendingImgs = [];
@@ -957,30 +1459,56 @@ function resetPendingImgs() {
   document.getElementById('addImgMsg').textContent = '';
   addImgRow.style.display = 'none';
 }
-addImgRow.querySelector('#addImgBtn').onclick = () => document.getElementById('addImgInput').click();
-document.getElementById('addImgInput').onchange = async e => {
-  const files = [...e.target.files];
-  e.target.value = '';
-  if (!files.length) return;
+async function addPendingFiles(files) {
   const holder = { images: pendingImgs };
   const n = await attachImages(holder, files);
   pendingImgs = holder.images;
+  addImgRow.style.display = 'block';
   document.getElementById('addImgMsg').textContent = n ? `已添加 ${n} 张` : '没有可用的图片';
   renderPendingThumbs();
+}
+document.getElementById('addImgBtn').onclick = () => document.getElementById('addImgInput').click();
+document.getElementById('addImgInput').onchange = async e => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  if (files.length) await addPendingFiles(files);
 };
+document.getElementById('addDrop').addEventListener('click', () => document.getElementById('addImgInput').click());
+bindDropzone(document.getElementById('addDrop'), addPendingFiles);
+
+/* 新增表单上的预设标签区（动态插入到公式工具条之后） */
+const addPresetBox = document.createElement('div');
+addPresetBox.id = 'addPreset';
+document.getElementById('latexBar').insertAdjacentElement('afterend', addPresetBox);
+function renderAddPreset() {
+  addPresetBox.innerHTML =
+    `<div class="preset-group">预设标签 · ${esc(curSubjectName())}<span class="badge-note" style="margin-left:8px">会加在本次导入的所有条目上</span></div>` +
+    presetTagsHTML(settings.subject);
+  addPresetBox.querySelectorAll('.preset-tag').forEach(b => {
+    b.onclick = () => {
+      const t = b.dataset.tag;
+      pendingTags.has(t) ? pendingTags.delete(t) : pendingTags.add(t);
+      paintPresetState(addPresetBox, x => pendingTags.has(x));
+    };
+  });
+  paintPresetState(addPresetBox, x => pendingTags.has(x));
+}
 
 addBtn.onclick = () => {
-  const d = DEF[active];
   pending = [];
+  pendingTags = new Set();
   resetPendingImgs();
-  document.getElementById('addTitle').textContent = active === 'q' ? '粘贴 AI 内容 / 手动填写' : '粘贴 / 手动新增知识点';
+  document.getElementById('addTitle').textContent = active === 'q'
+    ? `粘贴 AI 内容 / 手动填写（${curSubjectShort()}）`
+    : `粘贴 / 手动新增知识点（${curSubjectShort()}）`;
   document.getElementById('addHint').innerHTML = `按固定格式粘贴，点「拆分预览」自动拆成字段。多项之间用单独一行 <b>===</b> 分隔。`;
-  document.getElementById('formatHint').textContent = '格式示例：\n' + d.importExample;
+  document.getElementById('formatHint').textContent = '格式示例：\n' + DEF[active].importExample;
   document.getElementById('rawInput').value = '';
   previewEl.classList.remove('show');
   previewEl.innerHTML = '';
   importRow.style.display = 'none';
   document.getElementById('parseMsg').textContent = '';
+  renderAddPreset();
   modal.classList.add('open');
   document.getElementById('rawInput').focus();
 };
@@ -1024,7 +1552,6 @@ document.getElementById('importBtn').onclick = () => {
   const checked = [...previewEl.querySelectorAll('input[type=checkbox]')].filter(c => c.checked).map(c => +c.dataset.i);
   if (!checked.length) { alert('至少选一项。'); return; }
 
-  // 去重：与已有内容高度相似时先提醒（索引只建一次，避免逐条重扫）
   const dupIndex = buildDupIndex(active);
   const key = dupKey(active);
   const dups = checked.filter(i => findDupIn(dupIndex, pending[i][key]));
@@ -1033,14 +1560,20 @@ document.getElementById('importBtn').onclick = () => {
     if (!confirm(`检测到 ${dups.length} 项与已有内容高度相似：\n${names}${dups.length > 5 ? '\n…' : ''}\n\n仍要全部导入吗？点「取消」将中止本次导入。`)) return;
   }
 
-  // 单题导入时把临时配图挂上去
   if (checked.length === 1 && pendingImgs.length) pending[checked[0]].images = pendingImgs.slice();
 
+  const extra = [...pendingTags];
   const norm = stores[active].norm;
-  for (const i of checked) stores[active].items.push(norm(pending[i]));
+  for (const i of checked) {
+    const o = pending[i];
+    if (extra.length) o.tags = [...new Set((o.tags || []).concat(extra))];
+    if (!o.subject) o.subject = settings.subject;
+    stores[active].items.push(norm(o));
+  }
   saveActive();
   refreshTagPicker();
   resetPendingImgs();
+  pendingTags = new Set();
   modal.classList.remove('open');
   applyFilters();
 };
@@ -1053,10 +1586,9 @@ let editImgs = [];      // 草稿图片列表
 let editOrig = null;    // 打开弹窗时的原始图片集合
 
 function renderEditThumbs() {
-  renderThumbs(document.getElementById('editThumbs'), editImgs, id => {
-    editImgs = editImgs.filter(x => x !== id); // 先只改草稿，保存时才真正删 blob
-    renderEditThumbs();
-  });
+  renderThumbs(document.getElementById('editThumbs'), editImgs,
+    id => { editImgs = editImgs.filter(x => x !== id); renderEditThumbs(); },
+    (dir, id) => { editImgs = moveInArray(editImgs, dir, id); renderEditThumbs(); });
 }
 document.getElementById('editImgBtn').onclick = () => document.getElementById('editImgInput').click();
 document.getElementById('editImgInput').onchange = async e => {
@@ -1069,23 +1601,69 @@ document.getElementById('editImgInput').onchange = async e => {
   document.getElementById('editImgMsg').textContent = n ? `已添加 ${n} 张` : '没有可用的图片';
   renderEditThumbs();
 };
+document.getElementById('editDrop').addEventListener('click', () => document.getElementById('editImgInput').click());
+bindDropzone(document.getElementById('editDrop'), async files => {
+  if (!editOrig) return;
+  const holder = { images: [] };
+  const n = await attachImages(holder, files);
+  editImgs = editImgs.concat(holder.images);
+  document.getElementById('editImgMsg').textContent = n ? `已添加 ${n} 张` : '没有可用的图片';
+  renderEditThumbs();
+});
+
+function refreshCodePreview() {
+  const box = document.getElementById('ef_codePreview');
+  if (!box) return;
+  const el = document.getElementById('ef_code');
+  const src = el ? el.value : '';
+  const langEl = document.getElementById('ef_codeLang');
+  if (!src.trim()) { box.innerHTML = ''; if (langEl) langEl.textContent = ''; return; }
+  const lang = MQC.detectLang ? MQC.detectLang(src) : '';
+  if (langEl) langEl.textContent = '识别为 ' + ((MQC.LANG_LABEL || {})[lang] || lang || '纯文本');
+  box.innerHTML = MQC.codeBlockHTML ? MQC.codeBlockHTML(src, lang) : '';
+}
 
 function openEdit(it) {
   editingId = it.id;
   editOrig = new Set(it.images || []);
   editImgs = (it.images || []).slice();
   const d = DEF[active];
-  document.getElementById('editTitle').textContent = active === 'q' ? '编辑错题' : '编辑知识点';
+  document.getElementById('editTitle').textContent = active === 'q'
+    ? `编辑错题（${SUBJECT_SHORT[it.subject] || ''}）`
+    : `编辑知识点（${SUBJECT_SHORT[it.subject] || ''}）`;
   document.getElementById('editForm').innerHTML = Object.entries(d.fieldLabels).map(([key, label]) => `
-    <label>${label}</label>
-    <textarea id="ef_${key}" rows="4"></textarea>
+    <label class="f-label">${esc(label)}</label>
+    <textarea id="ef_${key}" rows="${key === 'code' ? 7 : 4}"${key === 'code' ? ' spellcheck="false"' : ''}></textarea>
+    ${key === 'code' ? '<div class="f-lang"><span class="section-label">高亮预览</span><span class="badge-note" id="ef_codeLang"></span></div><div id="ef_codePreview"></div>' : ''}
   `).join('') + `
-    <label>标签（英文逗号分隔）</label>
-    <input id="ef_tags" class="field-input" type="text" placeholder="导数, 极值">
+    <label class="f-label">标签（逗号分隔）</label>
+    <input id="ef_tags" class="field-input" type="text" placeholder="卷积, 傅里叶变换">
+    <div id="editPreset"></div>
   `;
-  for (const key of Object.keys(d.fieldLabels)) document.getElementById('ef_' + key).value = it[key];
-  document.getElementById('ef_tags').value = it.tags.join(', ');
+  for (const key of Object.keys(d.fieldLabels)) document.getElementById('ef_' + key).value = it[key] || '';
+
+  // 预设标签：点击直接切换该标签在输入框中的存在与否
+  const presetBox = document.getElementById('editPreset');
+  presetBox.innerHTML = `<div class="preset-group">预设标签 · ${esc(SUBJECT[it.subject] || '')}</div>` + presetTagsHTML(it.subject);
+  const on = t => document.getElementById('ef_tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean).includes(t);
+  presetBox.querySelectorAll('.preset-tag').forEach(b => {
+    b.onclick = () => {
+      const t = b.dataset.tag;
+      const el = document.getElementById('ef_tags');
+      const list = el.value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+      const i = list.indexOf(t);
+      if (i >= 0) list.splice(i, 1); else list.push(t);
+      el.value = list.join(', ');
+      paintPresetState(presetBox, on);
+    };
+  });
+  paintPresetState(presetBox, on);
+
   document.getElementById('editImgMsg').textContent = '';
+  if (document.getElementById('ef_code')) {
+    document.getElementById('ef_code').oninput = refreshCodePreview;
+    refreshCodePreview();
+  }
   renderEditThumbs();
   editModal.classList.add('open');
 }
@@ -1094,7 +1672,6 @@ function finishEdit() {
   editModal.classList.remove('open');
 }
 function cancelEdit() {
-  // 丢弃本次新增、未被保存的图片
   if (editOrig) editImgs.filter(id => !editOrig.has(id)).forEach(dropImage);
   finishEdit();
 }
@@ -1106,7 +1683,6 @@ document.getElementById('editSave').onclick = () => {
   for (const key of Object.keys(DEF[active].fieldLabels)) it[key] = document.getElementById('ef_' + key).value.trim();
   it.tags = document.getElementById('ef_tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
   it.updatedAt = Date.now();
-  // 图片：提交草稿，并删除被移除的 blob
   if (editOrig) [...editOrig].filter(id => !editImgs.includes(id)).forEach(dropImage);
   it.images = editImgs.slice();
   saveActive();
@@ -1123,7 +1699,7 @@ randomBtn.onclick = () => {
   const it = pool[Math.floor(Math.random() * pool.length)];
   const d = DEF[active];
   document.getElementById('randomTitle').textContent = d.overviewTitle;
-  const secs = d.details(it).filter(x => x.label !== '查看我的错误答案' || x.text);
+  const secs = visibleSections(it);
   document.getElementById('randomBody').innerHTML = `
     ${d.main(it)}
     ${imgStrip(it)}
@@ -1133,7 +1709,7 @@ randomBtn.onclick = () => {
       <span class="spacer"></span>
       <span class="status ${it.status}">● ${STATUS[it.status]}</span>
     </div>
-    ${secs.map(x => `<details><summary>${x.label}</summary><div class="body">${renderMath(x.text) || '<span class="section-label">（暂无）</span>'}</div></details>`).join('')}
+    ${secs.map(x => `<details><summary>${x.label}</summary><div class="body">${sectionHTML(x, it.images)}</div></details>`).join('')}
   `;
   hydrateImages(document.getElementById('randomBody'));
   randomModal.classList.add('open');
@@ -1154,11 +1730,15 @@ function downloadBlob(name, blob) {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+const FILE_BASE = '信号与系统DSP复习本';
 
 // 体积小的纯文字备份（不含配图）
 document.getElementById('exportBtn').onclick = () => {
-  const payload = { version: 2, questions: stores.q.items, knowledge: stores.k.items };
-  downloadBlob(`数学复习本-${dateStamp()}.json`,
+  const payload = {
+    version: 2, app: 'ss-dsp-review-book',
+    questions: stores.q.items, knowledge: stores.k.items,
+  };
+  downloadBlob(`${FILE_BASE}-${dateStamp()}.json`,
     new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
   setBackupMeta(Object.assign(getBackupMeta(), { json: Date.now() }));
   updateBackupBar();
@@ -1167,20 +1747,19 @@ document.getElementById('exportBtn').onclick = () => {
 // 完整备份：把配图以 base64 一并写入，换设备后可完整还原
 document.getElementById('exportFullBtn').onclick = async () => {
   settingsDrawer.classList.remove('open');
-  const payload = { version: 3, questions: stores.q.items, knowledge: stores.k.items, images: {} };
+  const payload = { version: 3, app: 'ss-dsp-review-book', questions: stores.q.items, knowledge: stores.k.items, images: {} };
   try {
     for (const id of referencedImageIds()) {
       const rec = await idbGet(id);
       if (rec && rec.blob) payload.images[id] = { type: rec.type || 'image/jpeg', data: await blobToB64(rec.blob) };
     }
   } catch (e) { /* 图片读取失败时仍导出文字部分 */ }
-  downloadBlob(`数学复习本-完整备份-${dateStamp()}.json`,
+  downloadBlob(`${FILE_BASE}-完整备份-${dateStamp()}.json`,
     new Blob([JSON.stringify(payload)], { type: 'application/json' }));
   setBackupMeta(Object.assign(getBackupMeta(), { json: Date.now() }));
   updateBackupBar();
 };
 
-// 手动清理未被任何条目（含回收站）引用的图片
 document.getElementById('gcBtn').onclick = async () => {
   const n = await gcImages();
   alert(n ? `已清理 ${n} 张无用图片。` : '没有发现无用图片。');
@@ -1198,7 +1777,7 @@ document.getElementById('fileInput').onchange = e => {
 
     let qs = null, ks = null, imgs = null;
     if (Array.isArray(data)) {
-      qs = data; // 兼容旧版：数组即错题列表
+      qs = data;
     } else if (data && typeof data === 'object') {
       if (Array.isArray(data.questions)) qs = data.questions;
       if (Array.isArray(data.knowledge)) ks = data.knowledge;
@@ -1222,7 +1801,6 @@ document.getElementById('fileInput').onchange = e => {
     if (qs) { const inc = qs.map(normalizeQuestion); stores.q.items = mode ? inc : stores.q.items.concat(inc); saveStore(K_Q, stores.q.items); }
     if (ks) { const inc = ks.map(normalizeKp); stores.k.items = mode ? inc : stores.k.items.concat(inc); saveStore(K_K, stores.k.items); }
 
-    // 还原配图（完整备份）：写入 IndexedDB，使条目里的图片 id 能取到
     let restored = 0;
     if (imgs) {
       for (const [id, rec] of Object.entries(imgs)) {
@@ -1234,7 +1812,6 @@ document.getElementById('fileInput').onchange = e => {
         } catch (e) { /* 单张失败忽略 */ }
       }
     }
-    // 替换模式下，被覆盖条目遗留的图片不再被引用，一并清掉
     if (mode) await gcImages();
 
     refreshTagPicker();
@@ -1266,12 +1843,19 @@ function renderStats() {
   const sum = (list, st) => list.filter(i => i.status === st).length;
   const starN = list => list.filter(i => i.star).length;
   const imgN = list => list.reduce((n, i) => n + (i.images ? i.images.length : 0), 0);
+  const codeN = list => list.filter(i => i.code).length;
   const weekN = list => list.filter(i => (i.createdAt || 0) >= week).length;
 
   const q = stores.q.items, k = stores.k.items;
   const freq = new Map();
   [...q, ...k].forEach(i => i.tags.forEach(t => freq.set(t, (freq.get(t) || 0) + 1)));
   const topTags = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+  const subLine = sub => {
+    const qn = q.filter(i => i.subject === sub).length;
+    const kn = k.filter(i => i.subject === sub).length;
+    return `<div class="stat-line"><span>${SUBJECT[sub]}（${SUBJECT_SHORT[sub]}）</span><b>${qn + kn}</b></div>`;
+  };
 
   document.getElementById('statsBody').innerHTML = `
     <div class="stats-grid">
@@ -1295,8 +1879,14 @@ function renderStats() {
       </div>
     </div>
     <div class="stat-card" style="margin-top:12px">
+      <h3>科目分布</h3>
+      ${subLine('ss')}
+      ${subLine('dsp')}
+    </div>
+    <div class="stat-card" style="margin-top:12px">
       <h3>其他</h3>
       <div class="stat-line"><span>配图数量</span><b>${imgN(q) + imgN(k)}</b></div>
+      <div class="stat-line"><span>含代码的错题</span><b>${codeN(q)}</b></div>
       <div class="stat-line"><span>标签数量</span><b>${freq.size}</b></div>
       <div class="stat-line"><span>回收站</span><b>${trash.length}</b></div>
       <div style="margin-top:8px">
@@ -1312,8 +1902,11 @@ function renderStats() {
 /* ---------- 导出 Markdown ---------- */
 function toMarkdown() {
   const isQ = active === 'q';
-  const items = curItems().slice().sort((a, b) => b.updatedAt - a.updatedAt);
-  const out = [`# 数学复习本 · ${isQ ? '错题' : '知识点'}`, '', `> 导出时间：${new Date().toLocaleString('zh-CN')} · 共 ${items.length} 项`, ''];
+  const items = curItems().filter(i => i.subject === settings.subject).slice().sort((a, b) => b.updatedAt - a.updatedAt);
+  const out = [
+    `# ${FILE_BASE} · ${curSubjectName()} · ${isQ ? '错题' : '知识点'}`, '',
+    `> 导出时间：${new Date().toLocaleString('zh-CN')} · 共 ${items.length} 项`, '',
+  ];
   items.forEach((it, idx) => {
     const tags = it.tags.join('、') || '—';
     out.push(`## ${idx + 1}. ${STATUS[it.status]}${it.star ? ' ★' : ''}`);
@@ -1327,6 +1920,7 @@ function toMarkdown() {
       if (it.myAnswer) { out.push(''); out.push('**我的错误答案**'); out.push(''); out.push(it.myAnswer); }
       if (it.analysis) { out.push(''); out.push('**解析**'); out.push(''); out.push(it.analysis); }
       if (it.knowledge) { out.push(''); out.push('**知识点**'); out.push(''); out.push(it.knowledge); }
+      if (it.code) { out.push(''); out.push('**代码**'); out.push(''); out.push('```' + (MQC.detectLang ? MQC.detectLang(it.code) : '')); out.push(it.code); out.push('```'); }
     } else {
       out.push(`**${it.title || '（无名称）'}**`);
       if (it.content) { out.push(''); out.push(it.content); }
@@ -1342,35 +1936,35 @@ function toMarkdown() {
 document.getElementById('exportMdBtn').onclick = () => {
   settingsDrawer.classList.remove('open');
   const isQ = active === 'q';
-  const items = curItems();
-  if (!items.length) { alert(`当前${isQ ? '错题' : '知识点'}库是空的。`); return; }
+  const items = curItems().filter(i => i.subject === settings.subject);
+  if (!items.length) { alert(`当前科目下的${isQ ? '错题' : '知识点'}库是空的。`); return; }
   const blob = new Blob([toMarkdown()], { type: 'text/markdown;charset=utf-8' });
-  const d = new Date();
-  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `数学复习本-${isQ ? '错题' : '知识点'}-${stamp}.md`;
+  a.download = `${FILE_BASE}-${curSubjectShort()}-${isQ ? '错题' : '知识点'}-${dateStamp()}.md`;
   a.click();
   URL.revokeObjectURL(a.href);
 };
 
-/* ---------- 打印（当前视图） ---------- */
+/* ---------- 打印（当前视图 + 当前科目） ---------- */
 document.getElementById('printBtn').onclick = () => {
   settingsDrawer.classList.remove('open');
   const isQ = active === 'q';
-  const items = curItems().slice().sort((a, b) => b.updatedAt - a.updatedAt);
-  if (!items.length) { alert(`当前${isQ ? '错题' : '知识点'}库是空的。`); return; }
+  const items = curItems().filter(i => i.subject === settings.subject).slice().sort((a, b) => b.updatedAt - a.updatedAt);
+  if (!items.length) { alert(`当前科目下的${isQ ? '错题' : '知识点'}库是空的。`); return; }
   const area = document.getElementById('printArea');
-  const head = `<h1>数学复习本 · ${isQ ? '错题' : '知识点'}</h1>
+  const head = `<h1>${FILE_BASE} · ${curSubjectName()} · ${isQ ? '错题' : '知识点'}</h1>
     <p class="print-meta">共 ${items.length} 项 · ${new Date().toLocaleDateString('zh-CN')}</p>`;
   const body = items.map((it, i) => {
     const tags = it.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('');
-    const main = isQ ? renderMath(it.stem) : `<b>${renderMath(it.title)}</b>`;
+    const main = isQ ? renderMath(it.stem, it.images) : `<b>${renderMath(it.title, it.images)}</b>`;
     const secs = isQ
-      ? [['我的错误答案', it.myAnswer], ['解析', it.analysis], ['知识点', it.knowledge]]
+      ? [['我的错误答案', it.myAnswer], ['解析', it.analysis], ['知识点', it.knowledge], ['代码', it.code]]
       : [['讲解', it.content]];
     const secHtml = secs.filter(s => s[1]).map(s =>
-      `<div class="print-sec"><div class="print-label">${s[0]}</div><div>${renderMath(s[1])}</div></div>`).join('');
+      s[0] === '代码'
+        ? `<div class="print-sec"><div class="print-label">代码</div><pre class="code">${esc(s[1])}</pre></div>`
+        : `<div class="print-sec"><div class="print-label">${s[0]}</div><div>${renderMath(s[1], it.images)}</div></div>`).join('');
     return `<div class="print-item">
       <div class="print-num">第 ${i + 1} 题${isQ ? '' : '（知识点）'} · ${STATUS[it.status]}${it.star ? ' ★' : ''}</div>
       <div class="print-head">${main}</div>
@@ -1385,7 +1979,6 @@ document.getElementById('printBtn').onclick = () => {
 };
 
 /* ---------- 备份提醒 ---------- */
-const K_LASTEXPORT = 'mq_lastexport';
 const BACKUP_DAYS = 14;
 const SNOOZE_DAYS = 7;
 function getBackupMeta() {
@@ -1442,7 +2035,7 @@ function cramGo(delta) {
 function revealNext() {
   const it = cram.pool[cram.idx];
   if (!it) return;
-  const next = DEF[active].details(it).filter(x => x.text).find(x => !cram.shown[x.label]);
+  const next = visibleSections(it).filter(x => x.text).find(x => !cram.shown[x.label]);
   if (next) { cram.shown[next.label] = true; renderCram(); }
 }
 
@@ -1450,13 +2043,13 @@ function renderCram() {
   const d = DEF[active];
   const it = cram.pool[cram.idx];
   if (!it) { closeCram(); return; }
-  document.getElementById('cramProg').textContent = `${cram.idx + 1} / ${cram.pool.length}`;
+  document.getElementById('cramProg').textContent = `${cram.idx + 1} / ${cram.pool.length} · ${curSubjectShort()}`;
   document.getElementById('cramPrev').disabled = cram.idx === 0;
   document.getElementById('cramNext').disabled = cram.idx === cram.pool.length - 1;
 
-  const secs = d.details(it).filter(x => x.text);
+  const secs = visibleSections(it).filter(x => x.text);
   const secHtml = secs.map(x => cram.shown[x.label]
-    ? `<div class="cram-sec"><span class="section-label">${esc(x.label.replace('查看', ''))}</span><div class="cram-body">${renderMath(x.text)}</div></div>`
+    ? `<div class="cram-sec"><span class="section-label">${esc(x.label.replace('查看', ''))}</span><div class="cram-body">${sectionHTML(x, it.images)}</div></div>`
     : `<button class="cram-reveal" data-reveal="${esc(x.label)}">👁 ${esc(x.label.replace('查看', '看'))}</button>`
   ).join('');
 
@@ -1524,7 +2117,17 @@ cramStage.addEventListener('touchend', e => {
   if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) cramGo(dx < 0 ? 1 : -1);
 }, { passive: true });
 
+/* 统一键盘处理：图片查看 > 背题模式 > 设置抽屉 */
 document.addEventListener('keydown', e => {
+  if (lightbox.classList.contains('open')) {
+    if (e.key === 'ArrowRight') lbGo(1);
+    else if (e.key === 'ArrowLeft') lbGo(-1);
+    else if (e.key === 'Escape') lbClose();
+    else if (e.key === '+' || e.key === '=') lbZoom(1.25);
+    else if (e.key === '-' || e.key === '_') lbZoom(0.8);
+    else if (e.key === 'r' || e.key === 'R') { lb.rot = (lb.rot + 90) % 360; lbApply(); }
+    return;
+  }
   if (cram.open) {
     if (e.key === 'ArrowRight') cramGo(1);
     else if (e.key === 'ArrowLeft') cramGo(-1);
@@ -1532,7 +2135,11 @@ document.addEventListener('keydown', e => {
     else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); revealNext(); }
     return;
   }
-  if (e.key === 'Escape' && settingsDrawer.classList.contains('open')) settingsDrawer.classList.remove('open');
+  if (e.key === 'Escape') {
+    if (settingsDrawer.classList.contains('open')) settingsDrawer.classList.remove('open');
+    else if (refDrawer.classList.contains('open')) refDrawer.classList.remove('open');
+    else if (plotDrawer.classList.contains('open')) closePlotDrawer();
+  }
 });
 
 /* ---------- 设置抽屉 ---------- */
@@ -1542,7 +2149,7 @@ document.getElementById('settingsClose').onclick = () => settingsDrawer.classLis
 settingsDrawer.onclick = e => { if (e.target === settingsDrawer) settingsDrawer.classList.remove('open'); };
 settingsDrawer.querySelectorAll('.seg button').forEach(btn => {
   btn.onclick = () => {
-    const key = btn.closest('.seg').id.slice(3).toLowerCase(); // setCols→cols 等
+    const key = btn.closest('.seg').id.slice(3).toLowerCase(); // setCols→cols / setImgSize→imgsize
     settings[key] = btn.dataset[key];
     saveSettings();
     applySettings();
@@ -1553,12 +2160,386 @@ window.addEventListener('resize', debounce(applySettings, 120));
 if (mqDark.addEventListener) mqDark.addEventListener('change', applySettings);
 if (mqMotion.addEventListener) mqMotion.addEventListener('change', applySettings);
 
+/* ===================== 速查表（变换对 / 性质 / 连续↔离散） ===================== */
+const refDrawer = document.getElementById('refDrawer');
+const refList = document.getElementById('refList');
+const refMsg = document.getElementById('refMsg');
+const refSearchEl = document.getElementById('refSearch');
+const refTabsEl = document.getElementById('refTabs');
+let refTab = 'pairs';
+
+const REF_GROUP_LABEL = {
+  ctft: '连续时间傅里叶变换（CTFT）',
+  laplace: '拉普拉斯变换',
+  z: 'Z 变换',
+  dft: '离散傅里叶变换（DFT / DTFT）',
+};
+const PROP_ROWS = [['ctft', '连续 FT'], ['laplace', '拉普拉斯'], ['z', 'Z 变换']];
+
+function katexInline(latex) {
+  try { return katex.renderToString(latex, { throwOnError: false }); }
+  catch (e) { return esc(latex); }
+}
+
+function renderRef() {
+  const res = MQT.searchTransforms
+    ? MQT.searchTransforms(refSearchEl.value)
+    : { pairs: [], props: [], contrasts: [] };
+  const parts = [];
+
+  if (refTab === 'pairs' || refTab === 'all') {
+    parts.push(`<div class="ref-group">变换对（${res.pairs.length}）</div>`);
+    if (!res.pairs.length) parts.push('<div class="ref-note">没有匹配的变换对。</div>');
+    const by = new Map();
+    res.pairs.forEach(p => {
+      if (!by.has(p.group)) by.set(p.group, []);
+      by.get(p.group).push(p);
+    });
+    for (const [g, arr] of by) {
+      parts.push(`<div class="ref-sub">${esc(REF_GROUP_LABEL[g] || g)}</div>`);
+      arr.forEach(p => parts.push(`
+        <div class="ref-item">
+          <div class="ref-head">${esc(p.name)}</div>
+          <div class="ref-latex ref-inline">${katexInline(p.time)}<span class="ref-arrow">↔</span>${katexInline(p.transform)}</div>
+          ${p.note ? `<div class="ref-note">${esc(p.note)}</div>` : ''}
+        </div>`));
+    }
+  }
+
+  if (refTab === 'props' || refTab === 'all') {
+    parts.push(`<div class="ref-group">变换性质（${res.props.length}）</div>`);
+    if (!res.props.length) parts.push('<div class="ref-note">没有匹配的性质。</div>');
+    res.props.forEach(p => {
+      const rows = PROP_ROWS.filter(([k]) => p[k]);
+      parts.push(`
+        <div class="ref-item">
+          <div class="ref-head">${esc(p.name)}</div>
+          ${rows.map(([k, l]) => `<div class="ref-sub">${l}</div><div class="ref-latex">${katexInline(p[k])}</div>`).join('')}
+          ${p.note ? `<div class="ref-note">${esc(p.note)}</div>` : ''}
+        </div>`);
+    });
+  }
+
+  if (refTab === 'contrast' || refTab === 'all') {
+    parts.push(`<div class="ref-group">连续 ↔ 离散 对照（${res.contrasts.length}）</div>`);
+    if (!res.contrasts.length) parts.push('<div class="ref-note">没有匹配的对照项。</div>');
+    res.contrasts.forEach(c => parts.push(`
+      <div class="ref-item">
+        <div class="ref-head">${esc(c.concept)}</div>
+        <div class="ref-sub">连续时间</div>
+        <div class="ref-latex">${katexInline(c.cont)}</div>
+        <div class="ref-sub">离散时间</div>
+        <div class="ref-latex">${katexInline(c.disc)}</div>
+        ${c.note ? `<div class="ref-note">${esc(c.note)}</div>` : ''}
+      </div>`));
+  }
+
+  const total = res.pairs.length + res.props.length + res.contrasts.length;
+  refMsg.textContent = refSearchEl.value.trim()
+    ? `匹配到 ${total} 条 · 变换对 ${res.pairs.length} · 性质 ${res.props.length} · 对照 ${res.contrasts.length}`
+    : `共 ${total} 条 · 变换对 ${res.pairs.length} · 性质 ${res.props.length} · 对照 ${res.contrasts.length}`;
+  refList.innerHTML = parts.join('') || '<div class="ref-note">没有内容。</div>';
+}
+
+document.getElementById('refBtn').onclick = () => { renderRef(); refDrawer.classList.add('open'); };
+document.getElementById('refClose').onclick = () => refDrawer.classList.remove('open');
+refDrawer.onclick = e => { if (e.target === refDrawer) refDrawer.classList.remove('open'); };
+refSearchEl.oninput = debounce(renderRef, 150);
+refTabsEl.querySelectorAll('button').forEach(b => {
+  b.onclick = () => {
+    refTab = b.dataset.ref;
+    refTabsEl.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    renderRef();
+  };
+});
+
+/* ===================== 绘图（波形 / 频谱 / 波特图 / 零极图 / 卷积图解） ===================== */
+const plotDrawer = document.getElementById('plotDrawer');
+const plotKindEl = document.getElementById('plotKind');
+const plotFieldsEl = document.getElementById('plotFields');
+const plotCanvas = document.getElementById('plotCanvas');
+const plotNoteEl = document.getElementById('plotNote');
+const plotConvCtl = document.getElementById('plotConvCtl');
+const convShiftEl = document.getElementById('convShift');
+const convShiftVal = document.getElementById('convShiftVal');
+
+let plotKind = 'ct';
+let plotTarget = null;      // null | 'add' | 'edit'：绘图后「存为配图」的目标
+let convCtl = null;
+let convPlaying = false;
+let convRafId = 0;
+let convMode = 'continuous';
+const plotSampleIdx = {};
+const plotCache = {};       // 记录各图型上次填写的参数，重新打开时不至于回到默认值
+
+const PLOT_FIELDS = {
+  ct: [
+    { id: 'expr', label: '表达式 x(t)', val: 'sin(2*pi*t)*u(t)', wide: true },
+    { id: 'tMin', label: 't 下限', val: '-2' },
+    { id: 'tMax', label: 't 上限', val: '5' },
+    { id: 'samples', label: '采样点数', val: '800' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  dt: [
+    { id: 'expr', label: '表达式 x[n]', val: '0.8^n*u(n)', wide: true },
+    { id: 'nMin', label: 'n 下限', val: '-2' },
+    { id: 'nMax', label: 'n 上限', val: '15' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  spectrum: [
+    { id: 'from', label: '来源', val: 'time', type: 'select',
+      opts: [['time', '由序列 x[n] 做 DFT'], ['expr', '直接给频谱表达式（变量 w）']] },
+    { id: 'mode', label: '绘制', val: 'mag', type: 'select',
+      opts: [['mag', '幅度谱'], ['phase', '相位谱'], ['both', '幅相两图（仅表达式）']] },
+    { id: 'expr', label: '表达式', val: '0.8^n', wide: true },
+    { id: 'nMin', label: '(序列) n 下限', val: '0' },
+    { id: 'nMax', label: '(序列) n 上限', val: '7' },
+    { id: 'kMax', label: 'DFT 点数 kMax', val: '7' },
+    { id: 'wMin', label: '(表达式) ω 下限', val: '0' },
+    { id: 'wMax', label: '(表达式) ω 上限', val: '10' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  bode: [
+    { id: 'num', label: '分子系数（高次→常数）', val: '[1]', wide: true },
+    { id: 'den', label: '分母系数', val: '[1, 1]', wide: true },
+    { id: 'domain', label: '域', val: 's', type: 'select',
+      opts: [['s', 's 域（连续，ω∈[0,∞)）'], ['z', 'z 域（离散，ω∈[0,π]）']] },
+    { id: 'wMin', label: 'ω 下限', val: '0.01' },
+    { id: 'wMax', label: 'ω 上限', val: '100' },
+    { id: 'samples', label: '采样点数', val: '400' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  polezero: [
+    { id: 'num', label: '分子系数', val: '[1, -0.2]', wide: true },
+    { id: 'den', label: '分母系数', val: '[1, -0.9]', wide: true },
+    { id: 'domain', label: '域', val: 'z', type: 'select',
+      opts: [['s', 's 域（左半平面 → 稳定）'], ['z', 'z 域（单位圆内 → 稳定）']] },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  conv: [
+    { id: 'mode', label: '类型', val: 'continuous', type: 'select',
+      opts: [['continuous', '连续卷积 y(t)=x*h'], ['discrete', '离散卷积和 y[n]=x*h']] },
+    { id: 'exprA', label: '信号 A', val: 'u(t)-u(t-1)', wide: true },
+    { id: 'exprB', label: '信号 B', val: 'rect(t)', wide: true },
+    { id: 'varMin', label: '变量下限', val: '-1' },
+    { id: 'varMax', label: '变量上限', val: '3' },
+    { id: 'samples', label: '采样点数（连续）', val: '400' },
+  ],
+};
+
+const CONV_SAMPLES = [
+  { mode: 'continuous', exprA: 'u(t)-u(t-1)', exprB: 't', varMin: 0, varMax: 2.5, samples: 400 },
+  { mode: 'discrete', exprA: 'u(n)-u(n-3)', exprB: '0.8^n*u(n)', varMin: -1, varMax: 8, samples: 40 },
+];
+
+const getFieldVal = id => {
+  const el = document.getElementById('pf_' + id);
+  return el ? el.value.trim() : '';
+};
+function parseCoeffs(s) {
+  const body = String(s || '').trim().replace(/^[\[\(]/, '').replace(/[\]\)]$/, '');
+  return body.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n));
+}
+function buildPlotFields() {
+  const defs = PLOT_FIELDS[plotKind] || [];
+  plotFieldsEl.innerHTML = defs.map(f => {
+    const cached = plotCache[plotKind + ':' + f.id];
+    const val = cached != null ? cached : f.val;
+    if (f.type === 'select') {
+      return `<label class="pf"><span>${esc(f.label)}</span>
+        <select id="pf_${f.id}" class="field-input">${f.opts.map(o => `<option value="${esc(o[0])}">${esc(o[1])}</option>`).join('')}</select>
+      </label>`;
+    }
+    return `<label class="pf${f.wide ? ' wide' : ''}"><span>${esc(f.label)}</span>
+      <input id="pf_${f.id}" class="field-input" autocomplete="off" spellcheck="false" value="${esc(val)}">
+    </label>`;
+  }).join('');
+  defs.forEach(f => {
+    const el = document.getElementById('pf_' + f.id);
+    if (!el) return;
+    if (f.type === 'select') el.value = plotCache[plotKind + ':' + f.id] != null ? plotCache[plotKind + ':' + f.id] : f.val;
+    el.addEventListener(f.type === 'select' ? 'change' : 'input', debounce(renderPlot, 250));
+  });
+  plotConvCtl.style.display = plotKind === 'conv' ? 'flex' : 'none';
+}
+function snapshotPlotFields() {
+  (PLOT_FIELDS[plotKind] || []).forEach(f => {
+    const el = document.getElementById('pf_' + f.id);
+    if (el) plotCache[plotKind + ':' + f.id] = el.value;
+  });
+}
+function readPlotSpec() {
+  const dark = effectiveTheme() === 'dark';
+  const n = id => Number(getFieldVal(id));
+  if (plotKind === 'ct') return { kind: 'ct', expr: getFieldVal('expr'), tMin: n('tMin'), tMax: n('tMax'), samples: n('samples'), label: getFieldVal('label'), dark };
+  if (plotKind === 'dt') return { kind: 'dt', expr: getFieldVal('expr'), nMin: n('nMin'), nMax: n('nMax'), label: getFieldVal('label'), dark };
+  if (plotKind === 'spectrum') {
+    const from = getFieldVal('from') === 'expr' ? 'expr' : 'time';
+    return {
+      kind: 'spectrum', from, mode: getFieldVal('mode'),
+      expr: getFieldVal('expr'), var: from === 'time' ? 'n' : 'w',
+      nMin: n('nMin'), nMax: n('nMax'), kMax: n('kMax'),
+      wMin: n('wMin'), wMax: n('wMax'), samples: 400, label: getFieldVal('label'), dark,
+    };
+  }
+  if (plotKind === 'bode') return { kind: 'bode', num: parseCoeffs(getFieldVal('num')), den: parseCoeffs(getFieldVal('den')), domain: getFieldVal('domain'), wMin: n('wMin'), wMax: n('wMax'), samples: n('samples'), label: getFieldVal('label'), dark };
+  if (plotKind === 'polezero') return { kind: 'polezero', num: parseCoeffs(getFieldVal('num')), den: parseCoeffs(getFieldVal('den')), domain: getFieldVal('domain'), label: getFieldVal('label'), dark };
+  if (plotKind === 'conv') return { kind: 'conv', mode: getFieldVal('mode') === 'discrete' ? 'discrete' : 'continuous', exprA: getFieldVal('exprA'), exprB: getFieldVal('exprB'), varMin: n('varMin'), varMax: n('varMax'), samples: n('samples'), dark };
+  return { kind: plotKind, dark };
+}
+
+function clearCanvas() {
+  try {
+    const ctx = plotCanvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, plotCanvas.width, plotCanvas.height);
+  } catch (e) {}
+}
+function convShiftLabel(v) {
+  return (convMode === 'discrete' ? 'n = ' : 'τ = ') + (Math.round(v * 1000) / 1000);
+}
+function destroyConv() {
+  stopConvSync();
+  if (convCtl) { try { convCtl.destroy(); } catch (e) {} convCtl = null; }
+}
+function renderPlot() {
+  const spec = readPlotSpec();
+  snapshotPlotFields();
+  if (plotKind === 'conv') { renderConv(spec); return; }
+  destroyConv();
+  if (!MQP.drawPlot) { plotNoteEl.textContent = '绘图模块（plot.js）未加载'; return; }
+  const r = MQP.drawPlot(plotCanvas, spec);
+  plotNoteEl.textContent = r === null ? '无法绘制（缺少 canvas 上下文）' : '';
+}
+function renderConv(spec) {
+  destroyConv();
+  if (!MQV.createConvController || !MQV.parseConvSpec) { plotNoteEl.textContent = '卷积模块（conv.js）未加载'; return; }
+  const parsed = MQV.parseConvSpec(spec);
+  convMode = parsed.mode || 'continuous';
+  if (parsed.error) { plotNoteEl.textContent = parsed.error; clearCanvas(); return; }
+  plotNoteEl.textContent = '';
+  convCtl = MQV.createConvController(plotCanvas, parsed);
+  convShiftEl.min = String(parsed.varMin);
+  convShiftEl.max = String(parsed.varMax);
+  convShiftEl.step = String(convMode === 'discrete' ? 1 : ((parsed.varMax - parsed.varMin) / 200 || 0.01));
+  convShiftEl.value = String(parsed.varMin);
+  convShiftVal.textContent = convShiftLabel(parsed.varMin);
+}
+function setConvPlayLabel() {
+  document.getElementById('convPlay').textContent = convPlaying ? '⏸ 暂停' : '▶ 播放';
+}
+function startConvSync() {
+  const step = () => {
+    if (!convPlaying || !convCtl) return;
+    const v = convCtl.getShift();
+    convShiftEl.value = String(v);
+    convShiftVal.textContent = convShiftLabel(v);
+    convRafId = requestAnimationFrame(step);
+  };
+  convRafId = requestAnimationFrame(step);
+}
+function stopConvSync() {
+  convPlaying = false;
+  if (convRafId) { cancelAnimationFrame(convRafId); convRafId = 0; }
+  setConvPlayLabel();
+}
+function openPlotDrawer(target) {
+  plotTarget = target || null;
+  plotDrawer.classList.add('open');
+  buildPlotFields();
+  renderPlot();
+}
+function closePlotDrawer() {
+  destroyConv();
+  plotDrawer.classList.remove('open');
+  plotTarget = null;
+}
+function plotSamples() {
+  if (plotKind === 'conv') return CONV_SAMPLES;
+  return (MQP.PREVIEW && MQP.PREVIEW[plotKind]) || [];
+}
+function applyPlotValues(o) {
+  (PLOT_FIELDS[plotKind] || []).forEach(f => {
+    if (!(f.id in o)) return;
+    let v = o[f.id];
+    if (Array.isArray(v)) v = '[' + v.join(', ') + ']';
+    const el = document.getElementById('pf_' + f.id);
+    if (el) el.value = String(v);
+    plotCache[plotKind + ':' + f.id] = String(v);
+  });
+}
+function canvasToBlob(canvas) {
+  return new Promise(res => {
+    if (!canvas || !canvas.toBlob) { res(null); return; }
+    try { canvas.toBlob(b => res(b), 'image/png'); } catch (e) { res(null); }
+  });
+}
+async function savePlotAsImage() {
+  const blob = await canvasToBlob(plotCanvas);
+  if (!blob) { plotNoteEl.textContent = '导出图片失败'; return; }
+  if (plotTarget === 'edit' || plotTarget === 'add') {
+    const id = 'img_' + uid();
+    await idbPut({ id, blob, type: 'image/png', size: blob.size || 0, addedAt: Date.now() });
+    if (plotTarget === 'edit') {
+      editImgs = editImgs.concat(id);
+      renderEditThumbs();
+      document.getElementById('editImgMsg').textContent = '已把绘制的图存为配图';
+    } else {
+      pendingImgs = pendingImgs.concat(id);
+      addImgRow.style.display = 'block';
+      renderPendingThumbs();
+      document.getElementById('addImgMsg').textContent = '已把绘制的图存为配图';
+    }
+    closePlotDrawer();
+  } else {
+    downloadBlob('plot-' + dateStamp() + '.png', blob);
+    plotNoteEl.textContent = '已下载 PNG';
+  }
+}
+
+plotKindEl.querySelectorAll('button').forEach(b => {
+  b.onclick = () => {
+    plotKind = b.dataset.kind;
+    plotKindEl.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    destroyConv();
+    buildPlotFields();
+    renderPlot();
+  };
+});
+document.getElementById('plotRender').onclick = renderPlot;
+document.getElementById('plotSample').onclick = () => {
+  const list = plotSamples();
+  if (!list.length) { plotNoteEl.textContent = '该图型没有内置示例'; return; }
+  const i = (plotSampleIdx[plotKind] || 0) % list.length;
+  plotSampleIdx[plotKind] = i + 1;
+  applyPlotValues(list[i]);
+  renderPlot();
+  plotNoteEl.textContent = '已载入示例 ' + (i + 1) + '/' + list.length;
+};
+document.getElementById('plotSaveImg').onclick = savePlotAsImage;
+document.getElementById('plotClose').onclick = closePlotDrawer;
+document.getElementById('plotBtn').onclick = () => openPlotDrawer(null);
+document.getElementById('addPlotBtn').onclick = () => openPlotDrawer('add');
+document.getElementById('editPlotBtn').onclick = () => openPlotDrawer('edit');
+plotDrawer.onclick = e => { if (e.target === plotDrawer) closePlotDrawer(); };
+convShiftEl.oninput = () => {
+  if (!convCtl) return;
+  let v = Number(convShiftEl.value);
+  if (convMode === 'discrete') v = Math.round(v);
+  convCtl.setShift(v);
+  convShiftVal.textContent = convShiftLabel(v);
+};
+document.getElementById('convPlay').onclick = () => {
+  if (!convCtl) return;
+  if (convPlaying) { convCtl.pause(); stopConvSync(); return; }
+  convCtl.play();
+  if (convCtl.isPlaying()) { convPlaying = true; setConvPlayLabel(); startConvSync(); }
+  else { plotNoteEl.textContent = '当前环境不支持动画播放'; }
+};
+
 /* ===================== AI 识题（可选功能，仅此功能需要联网） =====================
    上传题目图片 → 调用你所选服务商的视觉模型 → 按固定格式返回 → 你核对后导入。
-   API Key 仅存本机 localStorage（键 mq_ai）：不写入导出备份，也不进仓库。
+   API Key 仅存本机 localStorage（键 sd_ai）：不写入导出备份，也不进仓库。
    支持三种协议：OpenAI 兼容 / Google Gemini / Anthropic Claude。 */
-const K_AI = 'mq_ai';
-
 const AI_PRESETS = [
   { id: 'gemini', name: 'Google Gemini', protocol: 'gemini',
     baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash',
@@ -1673,22 +2654,25 @@ const aiNoun = () => active === 'q' ? '题目' : '知识点';
 function aiOcrPrompt() {
   const n = aiNoun();
   return [
-    `你是数学${n}识别助手。用户会给你一张图片（拍照或截图）。`,
+    `你是《信号与系统 / 数字信号处理》的${n}识别助手。用户会给你一张图片（拍照或截图）。`,
     `请只把图中的${n}**原文**准确转录出来，不要解答，也不要添加任何解析、答案或说明。`,
     '要求：',
     '1. 只输出原文本身，不要输出【】这类标记，不要标题，不要任何解释；',
     '2. 公式一律使用 LaTeX：行内公式用 $...$，独立公式用 $$...$$；',
     '   注意：矩阵、方程组、分段函数、多行推导等会跨行的公式必须用 $$...$$ 包裹，$...$ 不能跨行；',
-    `3. 图中若有多道${n}，它们之间用单独一行 === 分隔；`,
-    '4. 若图中没有可识别的内容，就只回答：未识别到内容。',
+    '3. 符号按课程惯例书写：连续时间用 $t$、$x(t)$、$X(j\\omega)$、$\\mathrm{u}(t)$、$\\delta(t)$；',
+    '   离散时间用 $n$、$x[n]$、$X(e^{j\\omega})$、$H(z)$、$u[n]$、$\\delta[n]$；',
+    '4. 图中若有 MATLAB / Python 代码，请先单独写一行标明语言（如 MATLAB 或 Python），再原样逐行转录；',
+    `5. 图中若有多道${n}，它们之间用单独一行 === 分隔；`,
+    '6. 若图中没有可识别的内容，就只回答：未识别到内容。',
   ].join('\n');
 }
 
 // 第二步：基于用户已核对/修正过的原文，解题并整理成导入格式
 function aiSolvePrompt(stem) {
   const d = DEF[active];
-  return [
-    `下面是用户已经核对确认过的数学${aiNoun()}原文，请据此完成整理。`,
+  const lines = [
+    `下面是用户已经核对确认过的《${curSubjectName()}》${aiNoun()}原文，请据此完成整理。`,
     '',
     '原文：',
     stem,
@@ -1699,14 +2683,53 @@ function aiSolvePrompt(stem) {
     '3. 公式一律使用 LaTeX：行内公式用 $...$，独立公式用 $$...$$；',
     '   注意：矩阵、方程组、分段函数、多行推导等会跨行的公式必须用 $$...$$ 包裹，$...$ 不能跨行；',
     '   矩阵换行用 \\\\，列用 &，例如 $$\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}$$；',
-    '4. 上面的原文里若含多项（以 === 分隔），输出的每一项与之一一对应；',
-    '5. 不要改动原文的题目内容，只在其基础上补充解答与整理；',
-    '6. 【我的错误答案】是留给用户自己填的，请保持为空、不要输出该段内容。',
-    '',
-    '格式示例：',
-    d.importExample,
-  ].join('\n');
+    '4. 解答要体现课程方法：连续系统可用时域卷积 / 傅里叶变换 / 拉普拉斯变换；',
+    '   离散系统可用卷积和 / Z 变换 / DTFT / DFT；注意收敛域（ROC）与稳定性判定；',
+  ];
+  if (active === 'q') {
+    lines.push('5. 若题解用得到 MATLAB 或 Python，把可直接运行的代码原样放进【代码】段（不要放进公式里）；');
+    lines.push('6. 【我的错误答案】是留给用户自己填的，请保持为空、不要输出该段内容；');
+  }
+  lines.push('7. 上面的原文里若含多项（以 === 分隔），输出的每一项与之一一对应；');
+  lines.push('8. 不要改动原文的内容，只在其基础上补充解答与整理。');
+  lines.push('');
+  lines.push('格式示例：');
+  lines.push(d.importExample);
+  return lines.join('\n');
 }
+
+// 「复制给我用的提示词」：让用户拿去任意对话式 AI 里预处理，再把结果粘回本应用
+function aiPromptText() {
+  const d = DEF[active];
+  const what = active === 'q'
+    ? `一道《${curSubjectName()}》题目`
+    : `一个《${curSubjectName()}》知识点（含讲解）`;
+  const lines = [
+    `请扮演《信号与系统 / 数字信号处理》课程的助教。下面我会把${what}发给你（可以直接发图片），`,
+    '请你把它整理成可直接导入我复习本的固定格式。',
+    '',
+    '输出要求：',
+    '1. 只输出固定格式的内容，不要任何解释、寒暄或标题；',
+    '2. 不要用 ``` 代码块把整体包裹起来；',
+    '3. 公式一律用 LaTeX：行内 $...$，独立 $$...$$；矩阵、方程组、分段函数、多行推导等跨行公式必须用 $$...$$；',
+  ];
+  if (active === 'q') {
+    lines.push('4. 解答要体现课程方法（连续：卷积 / 傅里叶 / 拉普拉斯；离散：卷积和 / Z 变换 / DTFT / DFT），注明收敛域与稳定性；用到 MATLAB / Python 时把可运行代码放进【代码】段；【我的错误答案】留空；');
+  } else {
+    lines.push('4. 讲解要讲清定义、物理含义与典型用法；');
+  }
+  lines.push('5. 多项之间用单独一行 === 分隔。');
+  lines.push('');
+  lines.push('固定格式如下（这就是我需要的输出格式）：');
+  lines.push(d.importExample);
+  lines.push('');
+  lines.push('现在请等我发送内容。');
+  return lines.join('\n');
+}
+aiEl('aiPromptBtn').onclick = async () => {
+  const ok = await copyText(aiPromptText());
+  aiEl('aiMsg').textContent = ok ? '提示词已复制，去任意 AI 粘贴即可' : '复制失败，请手动复制';
+};
 
 function aiHttpErr(status, data) {
   let m = '';
@@ -1964,6 +2987,9 @@ async function boot() {
   updateTrashCount();
   updateBackupBar();
   refreshTagPicker();
+  buildPlotFields();
+  renderPlot();
+  renderRef();
   render();
 }
 boot();

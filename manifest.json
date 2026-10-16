@@ -1,7 +1,7 @@
 {
-  "name": "数学复习本",
-  "short_name": "数学复习本",
-  "description": "数学错题与知识点复习本，支持公式渲染、离线使用。",
+  "name": "S&S · DSP 复习本",
+  "short_name": "S&S·DSP 复习本",
+  "description": "信号与系统 / 数字信号处理 错题与知识点复习本，支持公式渲染、波形绘图与离线使用。",
   "lang": "zh-CN",
   "start_url": "./index.html",
   "scope": "./",

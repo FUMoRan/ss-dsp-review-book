@@ -12,6 +12,10 @@
 
   const DAY = 86400000;
 
+  /* ---------- 科目（信号与系统 / 数字信号处理两门课合为一个站点，用顶部切换，数据以 subject 字段分区） ---------- */
+  const SUBJECT = { ss: '信号与系统', dsp: '数字信号处理' };
+  const SUBJECT_SHORT = { ss: 'S&S', dsp: 'DSP' };
+
   /* ---------- 状态 ---------- */
   const STATUS = { new: '未复习', reviewing: '复习中', mastered: '已掌握' };
   const STATUS_NEXT = { new: 'reviewing', reviewing: 'mastered', mastered: 'new' };
@@ -90,10 +94,12 @@
     const o = it && typeof it === 'object' ? it : {};
     return {
       id: o.id || uid(),
+      subject: SUBJECT[o.subject] ? o.subject : 'ss',
       stem: typeof o.stem === 'string' ? o.stem : '',
       analysis: typeof o.analysis === 'string' ? o.analysis : '',
       knowledge: typeof o.knowledge === 'string' ? o.knowledge : '',
       myAnswer: typeof o.myAnswer === 'string' ? o.myAnswer : '',
+      code: typeof o.code === 'string' ? o.code : '',
       tags: Array.isArray(o.tags) ? o.tags.filter(t => typeof t === 'string' && t.trim()) : [],
       status: STATUS[o.status] ? o.status : 'new',
       star: !!o.star,
@@ -108,6 +114,7 @@
     const o = it && typeof it === 'object' ? it : {};
     return {
       id: o.id || uid(),
+      subject: SUBJECT[o.subject] ? o.subject : 'ss',
       title: typeof o.title === 'string' ? o.title : '',
       content: typeof o.content === 'string' ? o.content : '',
       tags: Array.isArray(o.tags) ? o.tags.filter(t => typeof t === 'string' && t.trim()) : [],
@@ -166,11 +173,12 @@
   }
 
   /* ---------- 搜索语法 ----------
-     tag:导数  #导数    status:mastered/已掌握    star    due/今天
+     tag:卷积  #卷积    status:mastered/已掌握    star    due/今天
+     has:img/有图（有配图）   has:code/有代码（含代码块）
      其余词按普通关键词处理（AND）。 */
   const STATUS_TOKEN = { new: 'new', 未复习: 'new', reviewing: 'reviewing', 复习中: 'reviewing', mastered: 'mastered', 已掌握: 'mastered' };
   function parseSearch(str) {
-    const out = { text: '', tags: [], status: null, star: false, due: false };
+    const out = { text: '', tags: [], status: null, star: false, due: false, hasImg: false, hasCode: false };
     const words = [];
     String(str || '').trim().split(/\s+/).forEach(tok => {
       if (!tok) return;
@@ -179,6 +187,8 @@
       else if ((m = tok.match(/^status:(.+)$/i)) && m[1] && STATUS_TOKEN[m[1].toLowerCase()]) out.status = STATUS_TOKEN[m[1].toLowerCase()];
       else if (/^(star|\u661f\u6807)$/i.test(tok)) out.star = true;
       else if (/^(due|today|\u4eca\u5929|\u5f85\u590d\u4e60)$/i.test(tok)) out.due = true;
+      else if (/^(?:has:img|hasimg|\u6709\u56fe)$/i.test(tok)) out.hasImg = true;
+      else if (/^(?:has:code|hascode|\u6709\u4ee3\u7801)$/i.test(tok)) out.hasCode = true;
       else words.push(tok);
     });
     out.text = words.join(' ').toLowerCase();
@@ -188,6 +198,7 @@
 
   return {
     DAY,
+    SUBJECT, SUBJECT_SHORT,
     STATUS, STATUS_NEXT, uid,
     normText, bigrams, simScore, simScoreFrom, makeGramProfile, simFromProfile,
     SRS_DEF, normalizeSrs, scheduleSrs, isDue, dueLabel,

@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const MQ = require('../lib.js');
 
 const {
-  DAY, STATUS, STATUS_NEXT, uid,
+  DAY, SUBJECT, SUBJECT_SHORT, STATUS, STATUS_NEXT, uid,
   normText, bigrams, simScore, simScoreFrom, makeGramProfile, simFromProfile,
   normalizeSrs, scheduleSrs, isDue, dueLabel,
   normalizeQuestion, normalizeKp,
@@ -250,8 +250,9 @@ test('parseText 支持知识点库的字段映射', () => {
 
 /* ===================== 搜索语法 ===================== */
 test('parseSearch 空输入返回空条件', () => {
-  assert.deepEqual(parseSearch(''), { text: '', tags: [], status: null, star: false, due: false });
-  assert.deepEqual(parseSearch(null), { text: '', tags: [], status: null, star: false, due: false });
+  const empty = { text: '', tags: [], status: null, star: false, due: false, hasImg: false, hasCode: false };
+  assert.deepEqual(parseSearch(''), empty);
+  assert.deepEqual(parseSearch(null), empty);
 });
 
 test('parseSearch 普通关键词进入 text 并小写化', () => {
@@ -317,4 +318,56 @@ test('粘贴文本经解析归一化后可正确排程', () => {
   assert.equal(item.status, 'reviewing');
   assert.equal(item.srs.interval, 1);
   assert.equal(isDue(item, Date.now()), false);        // 已排到 1 天后
+});
+
+/* ===================== 科目与新增字段 ===================== */
+test('SUBJECT 定义两个科目及其简写', () => {
+  assert.equal(SUBJECT.ss, '信号与系统');
+  assert.equal(SUBJECT.dsp, '数字信号处理');
+  assert.equal(SUBJECT_SHORT.ss, 'S&S');
+  assert.equal(SUBJECT_SHORT.dsp, 'DSP');
+});
+
+test('normalizeQuestion / normalizeKp 的 subject 默认 ss，非法值回退 ss', () => {
+  assert.equal(normalizeQuestion({}).subject, 'ss');
+  assert.equal(normalizeQuestion({ subject: 'dsp' }).subject, 'dsp');
+  assert.equal(normalizeQuestion({ subject: 'xxx' }).subject, 'ss');
+  assert.equal(normalizeKp({}).subject, 'ss');
+  assert.equal(normalizeKp({ subject: 'dsp' }).subject, 'dsp');
+});
+
+test('normalizeQuestion 保留 code 字段，非字符串回退为空串', () => {
+  assert.equal(normalizeQuestion({ code: 'y = filter(b,a,x);' }).code, 'y = filter(b,a,x);');
+  assert.equal(normalizeQuestion({}).code, '');
+  assert.equal(normalizeQuestion({ code: 123 }).code, '');
+});
+
+test('parseText 支持【代码】字段映射（可多行）', () => {
+  const MAP = { 题目: 'stem', 解析: 'analysis', 代码: 'code', 标签: 'tags' };
+  const out = parseText('【题目】\n题\n【代码】\nb = [1 2 1];\na = [1 -0.5];', MAP, '题目');
+  assert.equal(out[0].code, 'b = [1 2 1];\na = [1 -0.5];');
+});
+
+/* ===================== 搜索：has:img / has:code ===================== */
+test('parseSearch has:img / has:code 标志位（中英文）', () => {
+  assert.equal(parseSearch('has:img').hasImg, true);
+  assert.equal(parseSearch('有图').hasImg, true);
+  assert.equal(parseSearch('has:code').hasCode, true);
+  assert.equal(parseSearch('有代码').hasCode, true);
+  const both = parseSearch('has:img has:code');
+  assert.equal(both.hasImg, true);
+  assert.equal(both.hasCode, true);
+  // 不能误伤普通关键词
+  assert.equal(parseSearch('img').hasImg, false);
+  assert.equal(parseSearch('img').text, 'img');
+  assert.equal(parseSearch('code').hasCode, false);
+});
+
+test('parseSearch 组合：标签 + 状态 + 有图 + 关键词', () => {
+  const s = parseSearch('tag:卷积 status:reviewing has:img 采样');
+  assert.deepEqual(s.tags, ['卷积']);
+  assert.equal(s.status, 'reviewing');
+  assert.equal(s.hasImg, true);
+  assert.equal(s.hasCode, false);
+  assert.equal(s.text, '采样');
 });
