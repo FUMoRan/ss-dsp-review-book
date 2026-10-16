@@ -2348,6 +2348,35 @@ const PLOT_FIELDS = {
     { id: 'varMax', label: '变量上限', val: '3' },
     { id: 'samples', label: '采样点数（连续）', val: '400' },
   ],
+  sampling: [
+    { id: 'from', label: '基带来源', val: 'expr', type: 'select',
+      opts: [['expr', '基带频谱表达式（变量 w）'], ['tf', '系统函数系数 |H(jω)|']] },
+    { id: 'expr', label: '基带频谱表达式', val: 'rect(w/6)', wide: true },
+    { id: 'num', label: '分子系数（tf 模式）', val: '[1]', wide: true },
+    { id: 'den', label: '分母系数（tf 模式）', val: '[1, 1]', wide: true },
+    { id: 'domain', label: '域（tf 模式）', val: 's', type: 'select',
+      opts: [['s', 's 域（连续）'], ['z', 'z 域（离散）']] },
+    { id: 'ws', label: '抽样角频率 ω_s（留空=不画复制）', val: '12' },
+    { id: 'wMax', label: 'ω 上限', val: '18' },
+    { id: 'samples', label: '采样点数', val: '600' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  window: [
+    { id: 'n', label: '窗长 N', val: '21' },
+    { id: 'types', label: '窗类型（逗号分隔）', val: 'rect,hann,hamming,blackman', wide: true },
+    { id: 'wMax', label: 'ω 上限', val: '3.1416' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
+  groupdelay: [
+    { id: 'num', label: '分子系数（高次→常数）', val: '[1]', wide: true },
+    { id: 'den', label: '分母系数', val: '[1, 1]', wide: true },
+    { id: 'domain', label: '域', val: 's', type: 'select',
+      opts: [['s', 's 域（群延迟单位：秒）'], ['z', 'z 域（群延迟单位：样本）']] },
+    { id: 'wMin', label: 'ω 下限', val: '0.01' },
+    { id: 'wMax', label: 'ω 上限', val: '10' },
+    { id: 'samples', label: '采样点数', val: '400' },
+    { id: 'label', label: '图注（可选）', val: '', wide: true },
+  ],
 };
 
 const CONV_SAMPLES = [
@@ -2408,6 +2437,14 @@ function readPlotSpec() {
   if (plotKind === 'bode') return { kind: 'bode', num: parseCoeffs(getFieldVal('num')), den: parseCoeffs(getFieldVal('den')), domain: getFieldVal('domain'), wMin: n('wMin'), wMax: n('wMax'), samples: n('samples'), label: getFieldVal('label'), dark };
   if (plotKind === 'polezero') return { kind: 'polezero', num: parseCoeffs(getFieldVal('num')), den: parseCoeffs(getFieldVal('den')), domain: getFieldVal('domain'), label: getFieldVal('label'), dark };
   if (plotKind === 'conv') return { kind: 'conv', mode: getFieldVal('mode') === 'discrete' ? 'discrete' : 'continuous', exprA: getFieldVal('exprA'), exprB: getFieldVal('exprB'), varMin: n('varMin'), varMax: n('varMax'), samples: n('samples'), dark };
+  if (plotKind === 'sampling') return {
+    kind: 'sampling', from: getFieldVal('from') === 'tf' ? 'tf' : 'expr',
+    expr: getFieldVal('expr'), num: parseCoeffs(getFieldVal('num')), den: parseCoeffs(getFieldVal('den')),
+    domain: getFieldVal('domain'), ws: getFieldVal('ws') === '' ? NaN : n('ws'),
+    wMax: n('wMax'), samples: n('samples'), label: getFieldVal('label'), dark,
+  };
+  if (plotKind === 'window') return { kind: 'window', n: n('n'), types: getFieldVal('types'), wMax: n('wMax'), label: getFieldVal('label'), dark };
+  if (plotKind === 'groupdelay') return { kind: 'groupdelay', num: parseCoeffs(getFieldVal('num')), den: parseCoeffs(getFieldVal('den')), domain: getFieldVal('domain'), wMin: n('wMin'), wMax: n('wMax'), samples: n('samples'), label: getFieldVal('label'), dark };
   return { kind: plotKind, dark };
 }
 

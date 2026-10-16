@@ -181,3 +181,94 @@ test('plan：返回命中明细与抽取到的参数', () => {
   assert.ok(p.hits.length >= 1);
   assert.ok(p.params.tf && p.params.tf.domain === 's');
 });
+
+/* ===================== 新增表型（roc / allpass / map / phase / window / circonv） ===================== */
+test('表型注册：新增表型均有标签与参数需求，无「有规则无实现」', () => {
+  const kinds = ['roc', 'allpass', 'map', 'phase', 'window', 'circonv'];
+  kinds.forEach(function (kind) {
+    assert.ok(MQG.TABLE_LABEL[kind], '缺 TABLE_LABEL：' + kind);
+    assert.ok(MQG.TABLE_NEED[kind], '缺 TABLE_NEED：' + kind);
+  });
+  // 每个已声明标签都必须在 TABLE_NEED 中有条目，结构保持一致
+  Object.keys(MQG.TABLE_LABEL).forEach(function (kind) {
+    assert.ok(Object.prototype.hasOwnProperty.call(MQG.TABLE_NEED, kind), 'TABLE_NEED 缺 ' + kind);
+  });
+});
+
+test('表格层：收敛域（ROC）与因果稳定判定', () => {
+  const p = MQG.plan('ss', {
+    subject: 'ss', tags: ['拉普拉斯变换'],
+    stem: '已知因果系统 $H(s)=\\dfrac{s+2}{s^{2}+2s+5}$，求收敛域',
+  });
+  const t = MQG.buildTable('roc', p.params);
+  assert.ok(t, '应生成 ROC 表');
+  assert.ok(t.rows.some(r => r[0] === 'Re(s) > -1' && r[2] === '是（含 ω 轴）'), JSON.stringify(t.rows));
+});
+
+test('表格层：全通 / 最小相位判定', () => {
+  const p = MQG.plan('dsp', {
+    subject: 'dsp', tags: ['全通'],
+    stem: '数字全通系统 $H(z)=\\dfrac{z^{-1}-0.5}{1-0.5z^{-1}}$',
+  });
+  const t = MQG.buildTable('allpass', p.params);
+  assert.ok(t, '应生成全通表');
+  const row = t.rows.find(r => r[0] === '是否全通');
+  assert.ok(/^是/.test(row[1]), '应为全通系统：' + row[1]);
+});
+
+test('表格层：连续 H(s) → 离散 H(z) 映射（双线性 + 脉冲响应不变）', () => {
+  const p = MQG.plan('dsp', {
+    subject: 'dsp', tags: ['系统函数'],
+    stem: '已知 $H(s)=\\dfrac{1}{s+1}$，采样 $f_s$=1000，用双线性变换求 H(z)',
+  });
+  const t = MQG.buildTable('map', p.params);
+  assert.ok(t, '应生成映射表');
+  assert.ok(t.rows.some(r => r[0] === '采样周期 T'));
+  assert.ok(t.rows.some(r => r[0] === '双线性映射后稳定性' && /稳定/.test(r[1])));
+});
+
+test('表格层：窗函数指标与相位群延迟表', () => {
+  const w = MQG.buildTable('window', { samp: { N: 21 } });
+  assert.ok(w, '应生成窗函数表');
+  assert.equal(w.rows.length, 4);
+  assert.ok(w.rows.some(r => r[0] === '矩形'));
+  const p = MQG.plan('dsp', {
+    subject: 'dsp', tags: ['系统函数'],
+    stem: '某离散系统 $H(z)=\\dfrac{1}{1-0.9z^{-1}}$，求频率响应',
+  });
+  const ph = MQG.buildTable('phase', p.params);
+  assert.ok(ph && ph.rows.length > 0, '应生成相位群延迟表');
+  assert.deepEqual(ph.head, ['频率 ω', '|H|', '相位 (°)', '群延迟 τ']);
+});
+
+test('表格层：循环卷积 vs 线性卷积（补零到 N≥L+P−1 时逐点一致）', () => {
+  const p = MQG.plan('dsp', {
+    subject: 'dsp', tags: ['循环卷积'],
+    stem: '设 $x[n]=u[n]-u[n-4]$，$h[n]=u[n]-u[n-3]$，求循环卷积',
+  });
+  const t = MQG.buildTable('circonv', p.params);
+  assert.ok(t && t.rows.length > 0, '应生成循环卷积对比表');
+  assert.ok(
+    t.rows.every(r => Math.abs(Number(r[1]) - Number(r[2])) < 1e-9),
+    'N 足够大时循环卷积应与线性卷积逐点一致：' + JSON.stringify(t.rows)
+  );
+});
+
+/* ===================== 新增图型（sampling / window / groupdelay） ===================== */
+test('plan：抽样 / 窗函数 / 群延迟三种新图型可生成字段', () => {
+  const win = MQG.plan('dsp', { subject: 'dsp', tags: ['窗函数'], stem: '用汉宁窗设计 FIR 滤波器，N=21' });
+  const w = win.items.find(i => i.type === 'plot' && i.kind === 'window');
+  assert.ok(w && w.ready, '窗函数频谱应就绪');
+  assert.equal(w.fields.n, '21');
+
+  const samp = MQG.plan('ss', { subject: 'ss', tags: ['抽样定理'], stem: '信号最高频率 $f_m$=3kHz，抽样 $f_s$=10kHz' });
+  const sp = samp.items.find(i => i.type === 'plot' && i.kind === 'sampling');
+  assert.ok(sp && sp.ready, '抽样示意图应就绪');
+  assert.equal(typeof sp.fields.expr, 'string');
+  assert.equal(sp.fields.ws, '10');
+
+  const gd = MQG.plan('dsp', { subject: 'dsp', tags: ['频率响应'], stem: '系统 $H(s)=\\dfrac{1}{s+1}$ 的群延迟' });
+  const g = gd.items.find(i => i.type === 'plot' && i.kind === 'groupdelay');
+  assert.ok(g && g.ready, '群延迟曲线应就绪');
+  assert.equal(g.fields.domain, 's');
+});

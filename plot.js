@@ -357,6 +357,204 @@
   }
 
   /* =========================================================
+     三点五、信号与系统 / DSP 专用纯函数（与 DOM 无关，可在 Node 下单测）
+     ========================================================= */
+  const GEPS = 1e-9;
+  // 数值格式化（去掉多余零）
+  function fmtNum(x) {
+    if (!isFinite(x)) return '—';
+    const r = Math.abs(x) < 1e-12 ? 0 : x;
+    return String(Math.round(r * 1000) / 1000);
+  }
+
+  // 复频响 H：s 域取 s=jω，z 域取 z=e^{jω}，返回 {re, im, mag, phase}
+  function respComplex(num, den, w, domain) {
+    const z = (domain === 'z') ? { re: Math.cos(w), im: Math.sin(w) } : { re: 0, im: w };
+    const nv = evalPoly(num, z), dv = evalPoly(den, z);
+    const d = dv.re * dv.re + dv.im * dv.im;
+    if (d === 0) return { re: NaN, im: NaN, mag: Infinity, phase: 0 };
+    const re = (nv.re * dv.re + nv.im * dv.im) / d;
+    const im = (nv.im * dv.re - nv.re * dv.im) / d;
+    return { re: re, im: im, mag: Math.hypot(re, im), phase: Math.atan2(im, re) };
+  }
+
+  // 相位解卷绕（弧度）：消除 atan2 的 ±π 跳变，得到连续相位
+  function unwrapPhase(ph) {
+    if (!ph.length) return [];
+    const TAU = 2 * Math.PI;
+    const out = [ph[0]];
+    let acc = ph[0];
+    for (let i = 1; i < ph.length; i++) {
+      let d = ph[i] - ph[i - 1];
+      d = ((d + Math.PI) % TAU + TAU) % TAU - Math.PI; // 折到 (−π, π]
+      acc += d;
+      out.push(acc);
+    }
+    return out;
+  }
+
+  // 群延迟 τ(ω) = −dφ/dω（数值中心差分）：s 域单位为秒，z 域单位为样本
+  function groupDelay(num, den, w, domain, hw) {
+    const h = hw || 1e-4;
+    const p1 = respComplex(num, den, w + h, domain).phase;
+    const p0 = respComplex(num, den, w - h, domain).phase;
+    if (!isFinite(p1) || !isFinite(p0)) return NaN;
+    let d = p1 - p0;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    return -d / (2 * h);
+  }
+
+  // 极点 → 可能的收敛域（ROC）及对应的因果性 / 稳定性
+  //   连续：半平面 / 竖条；离散：圆外 / 圆内 / 环带
+  function rocOf(poles, domain) {
+    if (!poles || !poles.length) return { empty: true };
+    const regions = [];
+    if (domain === 'z') {
+      const rs = poles.map(function (p) { return Math.hypot(p.re, p.im); });
+      const rmin = Math.min.apply(null, rs), rmax = Math.max.apply(null, rs);
+      regions.push({ roc: '|z| > ' + fmtNum(rmax), system: '因果（右边序列）', stable: rmax < 1 - GEPS, type: 'causal' });
+      if (rmin > GEPS) regions.push({ roc: '|z| < ' + fmtNum(rmin), system: '反因果（左边序列）', stable: rmin > 1 + GEPS, type: 'anticausal' });
+      if (rmax - rmin > GEPS) regions.push({ roc: fmtNum(rmin) + ' < |z| < ' + fmtNum(rmax), system: '双边序列', stable: rmin < 1 - GEPS && rmax > 1 + GEPS, type: 'twosided' });
+      return { domain: 'z', regions: regions, rmin: rmin, rmax: rmax, causalStable: rmax < 1 - GEPS };
+    }
+    const re = poles.map(function (p) { return p.re; });
+    const smin = Math.min.apply(null, re), smax = Math.max.apply(null, re);
+    regions.push({ roc: 'Re(s) > ' + fmtNum(smax), system: '因果（右边信号）', stable: smax < -GEPS, type: 'causal' });
+    regions.push({ roc: 'Re(s) < ' + fmtNum(smin), system: '反因果（左边信号）', stable: smin > GEPS, type: 'anticausal' });
+    if (smax - smin > GEPS) regions.push({ roc: fmtNum(smin) + ' < Re(s) < ' + fmtNum(smax), system: '双边信号', stable: smin < -GEPS && smax > GEPS, type: 'twosided' });
+    return { domain: 's', regions: regions, smin: smin, smax: smax, causalStable: smax < -GEPS };
+  }
+
+  // 全通 / 最小相位判定：
+  //   全通：零点 = 极点的镜像（连续关于虚轴，离散关于单位圆共轭倒数）
+  //   最小相位：零点全在左半平面 / 单位圆内
+  function allPassMinPhase(num, den, domain) {
+    const poles = polyRoots(den), zeros = polyRoots(num);
+    let allpass = poles.length > 0 && zeros.length === poles.length;
+    if (allpass) {
+      const rem = zeros.slice();
+      for (let k = 0; k < poles.length && allpass; k++) {
+        const p = poles[k];
+        const m2 = p.re * p.re + p.im * p.im;
+        const want = (domain === 'z')
+          ? { re: p.re / (m2 || 1), im: -p.im / (m2 || 1) }
+          : { re: -p.re, im: p.im };
+        let idx = -1;
+        for (let i = 0; i < rem.length; i++) {
+          if (Math.hypot(rem[i].re - want.re, rem[i].im - want.im) < 1e-6) { idx = i; break; }
+        }
+        if (idx < 0) allpass = false; else rem.splice(idx, 1);
+      }
+    }
+    const minphase = zeros.every(function (z) {
+      return (domain === 'z') ? Math.hypot(z.re, z.im) < 1 - GEPS : z.re < -GEPS;
+    });
+    return { allpass: allpass, minphase: minphase, poles: poles, zeros: zeros };
+  }
+
+  // 双线性变换：s=(2/T)(z−1)/(z+1) 代入 H(s)，返回 H(z) 的降幂系数 {num, den}
+  function polyScale(a, k) {
+    return toCoeffs(a).map(function (v) { return v * k; });
+  }
+  function polyPow(p, k) {
+    let r = [1];
+    for (let i = 0; i < k; i++) r = polyMul(r, p);
+    return r;
+  }
+  function bilinearTF(num, den, T) {
+    const K = 2 / (T || 1);
+    const n = Math.max(0, num.length - 1), m = Math.max(0, den.length - 1), L = Math.max(n, m);
+    const zm = [1, -1], zp = [1, 1];
+    const build = function (coeffs, deg) {
+      let acc = [0];
+      for (let i = 0; i < coeffs.length; i++) {
+        const p = deg - i;
+        acc = polyAdd(acc, polyScale(polyMul(polyPow(zm, p), polyPow(zp, i)), coeffs[i] * Math.pow(K, p)));
+      }
+      return acc;
+    };
+    let Np = polyMul(build(num, n), polyPow(zp, L - n));
+    let Dp = polyMul(build(den, m), polyPow(zp, L - m));
+    return { num: trimLead(Np), den: trimLead(Dp) };
+  }
+
+  // 脉冲响应不变：连续极点 s_k → 离散极点 z_k = e^{s_k T}
+  function impulseInvariantPoles(poles, T) {
+    return poles.map(function (p) {
+      const e = Math.exp(p.re * T);
+      return { re: e * Math.cos(p.im * T), im: e * Math.sin(p.im * T) };
+    });
+  }
+
+  // 常用窗函数系数（长度 N，对称）
+  function windowCoeffs(type, N) {
+    N = Math.max(2, Math.floor(N || 21));
+    const t = String(type || 'rect').toLowerCase();
+    const w = [];
+    for (let n = 0; n < N; n++) {
+      const x = 2 * Math.PI * n / (N - 1);
+      let v;
+      if (t === 'hann' || t === 'hanning') v = 0.5 - 0.5 * Math.cos(x);
+      else if (t === 'hamming') v = 0.54 - 0.46 * Math.cos(x);
+      else if (t === 'blackman') v = 0.42 - 0.5 * Math.cos(x) + 0.08 * Math.cos(2 * x);
+      else v = 1;
+      w.push(v);
+    }
+    return w;
+  }
+  // 窗函数在角频率 w 处的幅度谱
+  function windowMag(type, N, w) {
+    return dtft(windowCoeffs(type, N), w).mag;
+  }
+  // 窗函数指标：主瓣宽（bin，零点到零点）与最大旁瓣电平（dB，相对主瓣）
+  function windowMetrics(type, N) {
+    const N2 = Math.max(2, Math.floor(N || 21));
+    const M = 4000;
+    let peak = 0;
+    const ws = [], ms = [];
+    for (let i = 0; i <= M; i++) {
+      const w = Math.PI * i / M;
+      const m = windowMag(type, N2, w);
+      ws.push(w); ms.push(m);
+      if (m > peak) peak = m;
+    }
+    const nrm = ms.map(function (m) { return m / (peak || 1); });
+    // 第一个局部极小值 = 主瓣边界（零点到零点）
+    let nullIdx = -1;
+    for (let i = 1; i < nrm.length - 1; i++) {
+      if (nrm[i] < nrm[i - 1] && nrm[i] <= nrm[i + 1] && nrm[i] < 0.5) { nullIdx = i; break; }
+    }
+    let sl = 0;
+    if (nullIdx >= 0) for (let i = nullIdx; i < nrm.length; i++) if (nrm[i] > sl) sl = nrm[i];
+    const bins = nullIdx >= 0 ? ws[nullIdx] * N2 / Math.PI : NaN;
+    return { N: N2, bins: bins, sidelobeDb: 20 * Math.log10(sl || 1e-9) };
+  }
+
+  // 线性卷积（有限长因果序列）
+  function linearConv(a, b) {
+    const A = toCoeffs(a), B = toCoeffs(b);
+    const out = new Array(A.length + B.length - 1).fill(0);
+    for (let i = 0; i < A.length; i++) for (let j = 0; j < B.length; j++) out[i + j] += A[i] * B[j];
+    return out;
+  }
+  // N 点循环卷积
+  function circularConv(a, b, N) {
+    const A = toCoeffs(a), B = toCoeffs(b);
+    const n = Math.max(1, Math.floor(N || (A.length + B.length - 1)));
+    const out = new Array(n).fill(0);
+    for (let k = 0; k < n; k++) {
+      let s = 0;
+      for (let i = 0; i < A.length; i++) {
+        const j = ((k - i) % n + n) % n;
+        s += A[i] * (B[j] || 0);
+      }
+      out[k] = s;
+    }
+    return out;
+  }
+
+  /* =========================================================
      四、绘图（仅在 drawPlot 被调用时接触 canvas；Node 下安全降级）
      ========================================================= */
   function getCtx(canvas) {
@@ -728,10 +926,11 @@
     const h = (H - m.t - m.b - gap) / 2;
     const top = { x: m.l, y: m.t, w: W - m.l - m.r, h: h };
     const bot = { x: m.l, y: m.t + h + gap, w: W - m.l - m.r, h: h };
+    const phU = unwrapPhase(ph).map(function (v) { return v * 180 / Math.PI; });
     const dBpts = ws.map(function (w, i) { return { x: w, y: dB[i] }; });
-    const phpts = ws.map(function (w, i) { return { x: w, y: ph[i] }; });
+    const phpts = ws.map(function (w, i) { return { x: w, y: phU[i] }; });
     const ydb = niceRange(Math.min.apply(null, dB), Math.max.apply(null, dB));
-    const yph = [-180, 180];
+    const yph = niceRange(Math.min.apply(null, phU), Math.max.apply(null, phU));
 
     drawAxis(ctx, top, [wMin, wMax], ydb, th, null);
     drawCurve(ctx, top, dBpts, [wMin, wMax], ydb, th.curve, 1.8);
@@ -739,7 +938,7 @@
 
     drawAxis(ctx, bot, [wMin, wMax], yph, th, 'ω');
     drawCurve(ctx, bot, phpts, [wMin, wMax], yph, th.pole, 1.8);
-    drawLabel(ctx, bot, '相频 (°)', th);
+    drawLabel(ctx, bot, '相频 (°，已解卷绕)', th);
   }
 
   // 零极点图
@@ -771,6 +970,70 @@
       ctx.restore();
     }
 
+    // 收敛域（ROC）阴影：按 spec.roc（默认「因果」）取对应区域，绿=稳定 / 红=不稳定
+    const rocInfo = rocOf(poles, domain);
+    const rocKind = s.roc || 'causal';
+    let rocText = '';
+    if (rocKind !== 'none' && rocInfo && !rocInfo.empty) {
+      const reg = rocInfo.regions.filter(function (r) { return r.type === rocKind; })[0];
+      if (reg) {
+        ctx.save();
+        ctx.globalAlpha = 0.13;
+        ctx.fillStyle = reg.stable ? th.stem : th.pole;
+        if (domain === 'z') {
+          const cx = mapX(box, 0, xr[0], xr[1]);
+          const cy = mapY(box, 0, yr[0], yr[1]);
+          const rOut = Math.abs(mapX(box, rocInfo.rmax, xr[0], xr[1]) - cx);
+          const rIn = Math.abs(mapX(box, rocInfo.rmin, xr[0], xr[1]) - cx);
+          ctx.beginPath();
+          if (reg.type === 'causal') {
+            ctx.rect(box.x, box.y, box.w, box.h);
+            ctx.arc(cx, cy, rOut, 0, Math.PI * 2, true);
+            ctx.fill('evenodd');
+          } else if (reg.type === 'anticausal') {
+            ctx.arc(cx, cy, rIn, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            ctx.arc(cx, cy, rOut, 0, Math.PI * 2);
+            ctx.arc(cx, cy, rIn, 0, Math.PI * 2, true);
+            ctx.fill('evenodd');
+          }
+        } else {
+          const xB = mapX(box, rocInfo.smax, xr[0], xr[1]);
+          const xA = mapX(box, rocInfo.smin, xr[0], xr[1]);
+          ctx.beginPath();
+          if (reg.type === 'causal') ctx.rect(xB, box.y, box.x + box.w - xB, box.h);
+          else if (reg.type === 'anticausal') ctx.rect(box.x, box.y, xA - box.x, box.h);
+          else ctx.rect(xA, box.y, xB - xA, box.h);
+          ctx.fill();
+        }
+        ctx.restore();
+        // ROC 边界（虚线）
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = reg.stable ? th.stem : th.pole; ctx.lineWidth = 1.4;
+        if (domain === 'z') {
+          const cx = mapX(box, 0, xr[0], xr[1]);
+          const cy = mapY(box, 0, yr[0], yr[1]);
+          const rB = Math.abs(mapX(box, reg.type === 'anticausal' ? rocInfo.rmin : rocInfo.rmax, xr[0], xr[1]) - cx);
+          ctx.beginPath(); ctx.arc(cx, cy, rB, 0, Math.PI * 2); ctx.stroke();
+          if (reg.type === 'twosided') {
+            const rB2 = Math.abs(mapX(box, rocInfo.rmin, xr[0], xr[1]) - cx);
+            ctx.beginPath(); ctx.arc(cx, cy, rB2, 0, Math.PI * 2); ctx.stroke();
+          }
+        } else {
+          const xB = mapX(box, reg.type === 'anticausal' ? rocInfo.smin : rocInfo.smax, xr[0], xr[1]);
+          ctx.beginPath(); ctx.moveTo(xB, box.y); ctx.lineTo(xB, box.y + box.h); ctx.stroke();
+          if (reg.type === 'twosided') {
+            const xA = mapX(box, rocInfo.smin, xr[0], xr[1]);
+            ctx.beginPath(); ctx.moveTo(xA, box.y); ctx.lineTo(xA, box.y + box.h); ctx.stroke();
+          }
+        }
+        ctx.restore();
+        rocText = '　ROC: ' + reg.roc + (reg.stable ? '（稳定）' : '（不稳定）');
+      }
+    }
+
     // 极点 ×
     ctx.strokeStyle = th.pole; ctx.lineWidth = 2;
     poles.forEach(function (p) {
@@ -800,11 +1063,129 @@
       ? (domain === 's' ? '稳定：极点全在左半平面' : '稳定：极点全在单位圆内')
       : (domain === 's' ? '不稳定：存在右半平面极点' : '不稳定：存在单位圆外极点');
 
-    drawLabel(ctx, box, (s.label || (domain === 's' ? '连续系统' : '离散系统')) + '　× 极点　○ 零点', th);
+    drawLabel(ctx, box, (s.label || (domain === 's' ? '连续系统' : '离散系统')) + '　× 极点　○ 零点' + rocText, th);
     ctx.fillStyle = stable ? th.stem : th.pole;
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
     ctx.fillText(msg, W / 2, H - 8);
+  }
+
+  // 抽样示意：基带频谱 + 以 ω_s 为间隔的周期复制（叠加出混叠）
+  function drawSampling(ctx, W, H, s, th) {
+    const box = panelBox(W, H, { l: 54, r: 16, t: 26, b: 40 });
+    const N = Math.max(2, Math.floor(num(s.samples, 600)));
+    const ws = num(s.ws, NaN);
+    const wMax = num(s.wMax, isFinite(ws) ? ws * 2.5 : 10);
+    let mag;
+    const useTF = s.from === 'tf' && Array.isArray(s.num) && s.num.length;
+    if (!useTF && s.expr) {
+      let f;
+      try { f = compileExpr(s.expr); } catch (e) { notice(ctx, box, '表达式错误：' + e.message, th); return; }
+      mag = function (w) { const y = Number(f({ w: w })); return isFinite(y) ? Math.abs(y) : NaN; };
+    } else if (Array.isArray(s.num) && s.num.length) {
+      const numC = toCoeffs(s.num), denC = toCoeffs(s.den);
+      const dom = s.domain === 'z' ? 'z' : 's';
+      mag = function (w) { const r = respComplex(numC, denC, w, dom); return isFinite(r.mag) ? r.mag : NaN; };
+    } else {
+      notice(ctx, box, '未提供基带频谱（表达式或系统函数系数）', th);
+      return;
+    }
+    const base = [];
+    for (let i = 0; i <= N; i++) {
+      const w = wMax * i / N;
+      base.push({ x: w, y: mag(w) });
+    }
+    const yr = rangeOf(base, true);
+    drawAxis(ctx, box, [0, wMax], yr, th, 'ω');
+    // 周期复制（虚线、淡色）
+    if (isFinite(ws) && ws > 0) {
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = th.muted; ctx.lineWidth = 1.4;
+      const ks = [1, -1, 2, -2];
+      ks.forEach(function (k) {
+        const pts = [];
+        for (let i = 0; i <= N; i++) {
+          const w = wMax * i / N;
+          pts.push({ x: w, y: mag(w - k * ws) });
+        }
+        drawCurve(ctx, box, pts, [0, wMax], yr, th.muted, 1.2);
+      });
+      ctx.restore();
+      // 混叠带：ω_s < 2ω_m 时，[ω_s−ω_m, ω_m] 区间与原谱复制重叠
+      let wm = 0;
+      for (let i = 0; i <= N; i++) {
+        const w = wMax * i / N, y = mag(w);
+        if (isFinite(y) && Math.abs(y) > 1e-6 * (yr[1] - yr[0])) wm = w;
+      }
+      if (ws < 2 * wm && wm > 0) {
+        ctx.save();
+        ctx.globalAlpha = 0.18; ctx.fillStyle = th.pole;
+        const x1 = mapX(box, Math.max(0, ws - wm), 0, wMax);
+        const x2 = mapX(box, Math.min(wMax, wm), 0, wMax);
+        ctx.fillRect(x1, box.y, Math.max(0, x2 - x1), box.h);
+        ctx.restore();
+      }
+    }
+    drawCurve(ctx, box, base, [0, wMax], yr, th.curve, 1.8);
+    drawLabel(ctx, box, (s.label ? s.label + ' ' : '') + '抽样示意', th);
+    ctx.fillStyle = th.muted; ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(isFinite(ws)
+      ? ('ω_s = ' + fmtNum(ws) + '（实线=基带，虚线=±ω_s、±2ω_s 的周期复制）')
+      : '（实线=基带频谱；填写 ω_s 后叠加周期复制）', W / 2, H - 8);
+  }
+
+  // 窗函数频谱对比：多种窗的 |W(ω)| 归一化 dB 叠加
+  function drawWindow(ctx, W, H, s, th) {
+    const box = panelBox(W, H, { l: 54, r: 16, t: 26, b: 40 });
+    const N = Math.max(2, Math.floor(num(s.n, 21)));
+    const types = String(s.types || 'rect,hann,hamming,blackman').split(/[,，\s]+/).map(function (t) { return t.trim(); }).filter(Boolean);
+    const wMax = num(s.wMax, Math.PI);
+    const M = 600;
+    const cols = [th.curve, th.stem, th.pole, th.zeroMark];
+    const nameMap = { rect: '矩形', hann: '汉宁', hamming: '汉明', blackman: '布莱克曼' };
+    const curves = types.map(function (t, ti) {
+      const gsum = windowCoeffs(t, N).reduce(function (a, b) { return a + b; }, 0) || 1;
+      const pts = [];
+      for (let i = 0; i <= M; i++) {
+        const w = wMax * i / M;
+        const m = windowMag(t, N, w) / gsum;
+        pts.push({ x: w, y: 20 * Math.log10(m || 1e-9) });
+      }
+      return { t: t, pts: pts, color: cols[ti % cols.length] };
+    });
+    const yr = [-80, 5];
+    drawAxis(ctx, box, [0, wMax], yr, th, 'ω');
+    curves.forEach(function (c) { drawCurve(ctx, box, c.pts, [0, wMax], yr, c.color, 1.6); });
+    drawLabel(ctx, box, (s.label ? s.label + ' ' : '') + '窗函数频谱 (dB，相对主瓣)', th);
+    ctx.font = '11px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    let y = box.y + 22;
+    curves.forEach(function (c) {
+      ctx.fillStyle = c.color;
+      ctx.fillText((nameMap[c.t] || c.t) + ' (N=' + N + ')', box.x + 10, y);
+      y += 14;
+    });
+  }
+
+  // 群延迟 τ(ω) 曲线
+  function drawGroupDelay(ctx, W, H, s, th) {
+    const box = panelBox(W, H, { l: 54, r: 16, t: 26, b: 36 });
+    const domain = s.domain === 'z' ? 'z' : 's';
+    const numC = toCoeffs(s.num), denC = toCoeffs(s.den);
+    const wMin = num(s.wMin, domain === 'z' ? 0 : 0.01);
+    const wMax = num(s.wMax, domain === 'z' ? Math.PI : 10);
+    const N = Math.max(2, Math.floor(num(s.samples, 400)));
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const w = wMin + (wMax - wMin) * i / (N - 1);
+      let g = groupDelay(numC, denC, w, domain);
+      pts.push({ x: w, y: isFinite(g) ? g : NaN });
+    }
+    const yr = rangeOf(pts, false);
+    drawAxis(ctx, box, [wMin, wMax], yr, th, 'ω');
+    drawCurve(ctx, box, pts, [wMin, wMax], yr, th.curve, 1.8);
+    drawLabel(ctx, box, (s.label ? s.label + ' ' : '') + '群延迟' + (domain === 'z' ? '（样本）' : '（s）'), th);
   }
 
   // 分派绘制入口；无可用 canvas 时返回 null
@@ -825,6 +1206,9 @@
       else if (s.kind === 'spectrum') drawSpectrum(ctx, W, H, s, th);
       else if (s.kind === 'bode') drawBode(ctx, W, H, s, th);
       else if (s.kind === 'polezero') drawPoleZero(ctx, W, H, s, th);
+      else if (s.kind === 'sampling') drawSampling(ctx, W, H, s, th);
+      else if (s.kind === 'window') drawWindow(ctx, W, H, s, th);
+      else if (s.kind === 'groupdelay') drawGroupDelay(ctx, W, H, s, th);
       else {
         const box = panelBox(W, H, { l: 16, r: 16, t: 16, b: 16 });
         notice(ctx, box, '未知图型：' + (s.kind || '(空)'), th);
@@ -859,8 +1243,20 @@
       { kind: 'bode', num: [1], den: [1, -0.5], domain: 'z', wMin: 0, wMax: 3.1416, samples: 400, label: 'H(z)=1/(z-0.5)' },
     ],
     polezero: [
-      { kind: 'polezero', num: [1, -0.2], den: [1, -0.9], domain: 'z', label: 'H(z)=(z-0.2)/(z-0.9)' },
-      { kind: 'polezero', num: [1, 0, 4], den: [1, 2, 5], domain: 's', label: 'H(s)=(s²+4)/(s²+2s+5)' },
+      { kind: 'polezero', num: [1, -0.2], den: [1, -0.9], domain: 'z', roc: 'causal', label: 'H(z)=(z-0.2)/(z-0.9)' },
+      { kind: 'polezero', num: [1, 0, 4], den: [1, 2, 5], domain: 's', roc: 'causal', label: 'H(s)=(s²+4)/(s²+2s+5)' },
+    ],
+    sampling: [
+      { kind: 'sampling', expr: '1-abs(w)/6', ws: 12, wMax: 18, samples: 600, label: '理想低通基带谱 + 抽样复制' },
+      { kind: 'sampling', expr: 'exp(-w^2/8)', ws: 6, wMax: 15, samples: 600, label: '高斯谱：ω_s 偏小产生混叠' },
+    ],
+    window: [
+      { kind: 'window', n: 21, types: 'rect,hann,hamming,blackman', wMax: 3.1416, label: '四种窗频谱对比（N=21）' },
+      { kind: 'window', n: 51, types: 'rect,hamming', wMax: 3.1416, label: 'N=51：矩形窗 vs 汉明窗' },
+    ],
+    groupdelay: [
+      { kind: 'groupdelay', num: [1], den: [1, 1], domain: 's', wMin: 0.01, wMax: 10, samples: 400, label: 'H(s)=1/(s+1) 群延迟' },
+      { kind: 'groupdelay', num: [1, -0.5], den: [1, -0.9], domain: 'z', wMin: 0, wMax: 3.1416, samples: 400, label: 'H(z) 群延迟' },
     ],
   };
 
@@ -873,6 +1269,18 @@
     polyRoots: polyRoots,
     dft: dft,
     dtft: dtft,
+    respComplex: respComplex,
+    unwrapPhase: unwrapPhase,
+    groupDelay: groupDelay,
+    rocOf: rocOf,
+    allPassMinPhase: allPassMinPhase,
+    bilinearTF: bilinearTF,
+    impulseInvariantPoles: impulseInvariantPoles,
+    windowCoeffs: windowCoeffs,
+    windowMag: windowMag,
+    windowMetrics: windowMetrics,
+    linearConv: linearConv,
+    circularConv: circularConv,
     drawPlot: drawPlot,
     PREVIEW: PREVIEW,
   };

@@ -29,26 +29,36 @@
      一、规则层：标签 → 生成项
      R(plots, tables, need)
        plots 图型id  ct 时域波形 / dt 离散杆图 / spectrum 频谱 / bode 幅频相频
-                    polezero 零极图 / conv 卷积图解
+                    polezero 零极图 / conv 卷积图解 / sampling 抽样示意 /
+                    window 窗函数频谱 / groupdelay 群延迟
        tables 表型id values 关键值 / spectrum 频谱关键点 / pairs 命中变换对 /
                     poles 极点稳定性 / conv 卷积逐项 / sampling 抽样混叠 /
-                    freqs 频率响应关键点 / coeffs 系数特征根
+                    freqs 频率响应关键点 / coeffs 系数特征根 /
+                    roc 收敛域判定 / allpass 全通与最小相位 / map 连续→离散映射 /
+                    phase 相位与群延迟 / window 窗函数指标 / circonv 循环卷积对比
        need  需要的参数：ct 连续信号 / dt 离散序列 / tf 系统函数 / diff 差分微分方程 /
                     samp 采样参数 / pair 卷积两路信号 / signal 任一信号
      ========================================================= */
   const PLOT_LABEL = {
     ct: '时域波形', dt: '离散杆图', spectrum: '频谱', bode: '幅频/相频',
     polezero: '零极点图', conv: '卷积图解',
+    sampling: '抽样示意', window: '窗函数频谱', groupdelay: '群延迟',
   };
   const TABLE_LABEL = {
     values: '关键值表', spectrum: '频谱关键点', pairs: '命中的变换对',
     poles: '极点与稳定性', conv: '卷积逐项表', sampling: '抽样与混叠判定',
     freqs: '频率响应关键点', coeffs: '系数与特征根',
+    roc: '收敛域与因果稳定', allpass: '全通与最小相位', map: '连续→离散映射',
+    phase: '相位与群延迟', window: '窗函数指标', circonv: '循环卷积 vs 线性卷积',
   };
-  const PLOT_NEED = { ct: ['ct'], dt: ['dt'], spectrum: ['dt'], bode: ['tf'], polezero: ['tf'], conv: ['pair'] };
+  const PLOT_NEED = {
+    ct: ['ct'], dt: ['dt'], spectrum: ['dt'], bode: ['tf'], polezero: ['tf'], conv: ['pair'],
+    sampling: ['samp'], window: [], groupdelay: ['tf'],
+  };
   const TABLE_NEED = {
     values: ['signal'], spectrum: ['dt'], pairs: ['signal'], poles: ['tf'],
     conv: ['pair'], sampling: ['samp'], freqs: ['tf'], coeffs: ['diff'],
+    roc: ['tf'], allpass: ['tf'], map: ['tf', 'samp'], phase: ['tf'], window: [], circonv: ['pair'],
   };
   const R = (plots, tables, need) => ({ plots: plots || [], tables: tables || [], need: need || [] });
 
@@ -67,25 +77,25 @@
       '频谱': R(['spectrum'], ['spectrum'], ['ct']),
       '幅度谱': R(['spectrum'], ['spectrum'], ['ct']),
       '相位谱': R(['spectrum'], ['spectrum'], ['ct']),
-      '拉普拉斯变换': R(['polezero'], ['poles'], ['tf']),
-      '收敛域': R(['polezero'], ['poles'], ['tf']),
+      '拉普拉斯变换': R(['polezero'], ['poles', 'roc'], ['tf']),
+      '收敛域': R(['polezero'], ['poles', 'roc'], ['tf']),
       '变换性质': R([], ['pairs'], []),
       '线性时不变': R([], [], []),
-      '因果': R([], ['poles'], ['tf']),
-      '稳定': R([], ['poles'], ['tf']),
+      '因果': R([], ['poles', 'roc'], ['tf']),
+      '稳定': R([], ['poles', 'roc'], ['tf']),
       '卷积': R(['conv'], ['conv'], ['pair']),
       '冲激响应': R(['ct', 'conv'], ['values'], ['pair']),
       '阶跃响应': R(['ct'], ['values'], ['ct']),
-      '系统函数': R(['polezero', 'bode'], ['poles', 'freqs'], ['tf']),
+      '系统函数': R(['polezero', 'bode'], ['poles', 'freqs', 'phase'], ['tf']),
       '零极点': R(['polezero'], ['poles'], ['tf']),
-      '频率响应': R(['bode'], ['freqs'], ['tf']),
-      '全通': R(['polezero', 'bode'], ['poles'], ['tf']),
-      '无失真传输': R(['bode'], ['freqs'], ['tf']),
-      '抽样定理': R(['spectrum'], ['sampling'], ['samp']),
-      '频谱混叠': R(['spectrum'], ['sampling'], ['samp']),
+      '频率响应': R(['bode', 'groupdelay'], ['freqs', 'phase'], ['tf']),
+      '全通': R(['polezero', 'bode'], ['poles', 'allpass'], ['tf']),
+      '无失真传输': R(['bode', 'groupdelay'], ['freqs', 'phase'], ['tf']),
+      '抽样定理': R(['spectrum', 'sampling'], ['sampling'], ['samp']),
+      '频谱混叠': R(['spectrum', 'sampling'], ['sampling'], ['samp']),
       '调制': R(['spectrum'], ['spectrum'], ['ct']),
-      '滤波器': R(['bode'], ['freqs'], ['tf']),
-      '微分方程': R(['polezero'], ['coeffs'], ['diff']),
+      '滤波器': R(['bode', 'groupdelay'], ['freqs', 'phase'], ['tf']),
+      '微分方程': R(['polezero'], ['coeffs', 'poles', 'roc'], ['diff']),
       '状态方程': R([], ['coeffs'], ['diff']),
       '信号分解': R(['ct'], ['values'], ['ct']),
     },
@@ -99,26 +109,26 @@
       'DTFT': R(['spectrum'], ['spectrum'], ['dt']),
       'DFT': R(['spectrum'], ['spectrum'], ['dt']),
       'FFT': R(['spectrum'], ['spectrum'], ['dt']),
-      'Z变换': R(['dt', 'polezero'], ['values', 'poles'], ['dt', 'tf']),
-      '循环卷积': R(['conv'], ['conv'], ['pair']),
-      '线性卷积': R(['conv'], ['conv'], ['pair']),
-      '频谱泄漏': R(['spectrum'], ['spectrum'], ['dt']),
-      '频率分辨率': R([], ['sampling'], ['samp']),
+      'Z变换': R(['dt', 'polezero'], ['values', 'poles', 'roc'], ['dt', 'tf']),
+      '循环卷积': R(['conv'], ['conv', 'circonv'], ['pair']),
+      '线性卷积': R(['conv'], ['conv', 'circonv'], ['pair']),
+      '频谱泄漏': R(['spectrum', 'window'], ['spectrum'], ['dt']),
+      '频率分辨率': R(['sampling'], ['sampling'], ['samp']),
       '线性移不变': R([], [], []),
-      '因果稳定': R([], ['poles'], ['tf']),
-      '差分方程': R(['polezero'], ['coeffs'], ['diff']),
-      '系统函数': R(['polezero', 'bode'], ['poles', 'freqs'], ['tf']),
+      '因果稳定': R([], ['poles', 'roc'], ['tf']),
+      '差分方程': R(['polezero'], ['coeffs', 'poles', 'roc'], ['diff']),
+      '系统函数': R(['polezero', 'bode'], ['poles', 'freqs', 'phase', 'map'], ['tf']),
       '零极点': R(['polezero'], ['poles'], ['tf']),
-      '频率响应': R(['bode'], ['freqs'], ['tf']),
-      '全通': R(['polezero', 'bode'], ['poles'], ['tf']),
-      '最小相位': R(['polezero'], ['poles'], ['tf']),
-      'IIR': R(['bode'], ['coeffs', 'freqs'], ['diff']),
-      'FIR': R(['bode'], ['coeffs', 'freqs'], ['diff']),
-      '采样': R(['spectrum'], ['sampling'], ['samp']),
-      '抽取': R([], ['sampling'], ['samp']),
-      '内插': R([], ['sampling'], ['samp']),
-      '多速率': R([], ['sampling'], ['samp']),
-      '窗函数': R(['ct', 'spectrum'], ['values'], ['ct']),
+      '频率响应': R(['bode', 'groupdelay'], ['freqs', 'phase'], ['tf']),
+      '全通': R(['polezero', 'bode'], ['poles', 'allpass'], ['tf']),
+      '最小相位': R(['polezero'], ['poles', 'allpass'], ['tf']),
+      'IIR': R(['bode', 'groupdelay'], ['coeffs', 'freqs', 'phase'], ['diff']),
+      'FIR': R(['bode', 'groupdelay'], ['coeffs', 'freqs', 'phase'], ['diff']),
+      '采样': R(['spectrum', 'sampling'], ['sampling', 'map'], ['samp']),
+      '抽取': R(['sampling'], ['sampling'], ['samp']),
+      '内插': R(['sampling'], ['sampling'], ['samp']),
+      '多速率': R(['sampling'], ['sampling'], ['samp']),
+      '窗函数': R(['ct', 'spectrum', 'window'], ['values', 'window'], ['ct']),
       'DFT 对称性': R([], ['spectrum'], ['dt']),
       'FFT 算法': R([], ['spectrum'], ['dt']),
     },
@@ -728,22 +738,161 @@
     if (!s) return null;
     const rows = [];
     if (s.fm != null) rows.push(['信号最高频率 f_m', f3(s.fm)]);
+    if (s.fm != null) rows.push(['奈奎斯特率 2f_m', f3(2 * s.fm)]);
     if (s.fs != null) rows.push(['抽样频率 f_s', f3(s.fs)]);
-    if (s.fm != null) {
-      rows.push(['奈奎斯特率 2f_m', f3(2 * s.fm)]);
-      if (s.fs != null) {
-        const ok = s.fs > 2 * s.fm;
-        rows.push(['眉量 f_s − 2f_m', f3(s.fs - 2 * s.fm)]);
-        rows.push(['是否满足抽样定理', ok ? '满足，不混叠' : '不满足，将混叠']);
-        if (s.f0 != null && !ok) {
-          rows.push(['f₀=' + f3(s.f0) + ' 的混叠频率', f3(Math.abs(s.f0 - s.fs * Math.round(s.f0 / s.fs)))]);
-        }
-      }
+    if (s.fm != null && s.fs != null) {
+      const ok = s.fs > 2 * s.fm;
+      rows.push(['裕量 f_s − 2f_m', f3(s.fs - 2 * s.fm)]);
+      rows.push(['是否满足抽样定理', ok ? '满足，不混叠' : '不满足，将混叠']);
+    }
+    if (s.fs != null) {
+      rows.push(['折叠频率 f_s/2', f3(s.fs / 2)]);
+      rows.push(['奈奎斯特间隔 T_s = 1/f_s', f3(1 / s.fs)]);
+    }
+    if (s.f0 != null && s.fs != null) {
+      rows.push(['f₀=' + f3(s.f0) + ' 的折叠/混叠频率', f3(Math.abs(s.f0 - s.fs * Math.round(s.f0 / s.fs)))]);
     }
     if (s.N != null) rows.push(['点数 N', String(s.N)]);
-    if (s.fs != null && s.N != null) rows.push(['频率分辨率 Δf = f_s/N', f3(Math.abs(s.fs / s.N))]);
+    if (s.fs != null && s.N != null) {
+      rows.push(['频率分辨率 Δf = f_s/N', f3(Math.abs(s.fs / s.N))]);
+      rows.push(['记录时长 T = N·T_s', f3(s.N / s.fs)]);
+    }
     if (!rows.length) return null;
-    return { title: '抽样与混叠判定', head: ['参数', '值'], rows, note: '判定依据 f_s > 2f_m；未给出的量不列出' };
+    return { title: '抽样与混叠判定', head: ['参数', '值'], rows, note: '判定依据 f_s > 2f_m；混叠频率 f_a = |f₀ − k·f_s|（k 取最近整数）' };
+  }
+
+  // 收敛域（ROC）与因果 / 稳定判定
+  function rocTable(params) {
+    const tf = params.tf || params.diff;
+    if (!tf) return null;
+    const poles = MQP().polyRoots(tf.den);
+    if (!poles.length) return null;
+    const info = MQP().rocOf(poles, tf.domain);
+    if (!info || info.empty) return null;
+    const rows = info.regions.map(r => [r.roc, r.system, r.stable ? '是（含 ω 轴）' : '否']);
+    const concl = info.causalStable ? '存在「因果且稳定」的收敛域' : '不存在「因果且稳定」的收敛域';
+    return {
+      title: '收敛域（ROC）与因果 / 稳定判定',
+      head: ['可能的收敛域', '对应信号', '稳定？'],
+      rows,
+      note: (tf.domain === 'z'
+        ? '离散：ROC 为 |z|>r 圆外 / |z|<r 圆内 / 环带；稳定 ⇔ ROC 含单位圆 '
+        : '连续：ROC 为半平面 / 竖条；稳定 ⇔ ROC 含虚轴 jω ')
+        + '｜' + concl,
+    };
+  }
+
+  // 全通 / 最小相位判定
+  function allpassTable(params) {
+    const tf = params.tf || params.diff;
+    if (!tf) return null;
+    const info = MQP().allPassMinPhase(tf.num, tf.den, tf.domain);
+    const isZ = tf.domain === 'z';
+    const rows = [
+      ['是否全通', info.allpass ? '是（零极点关于' + (isZ ? '单位圆' : '虚轴') + '镜像对称）' : '否'],
+      ['是否最小相位', info.minphase ? '是（零点全在' + (isZ ? '单位圆内' : '左半平面') + '）' : '否（存在' + (isZ ? '圆外' : '右半平面') + '零点）'],
+    ];
+    info.zeros.forEach((z, i) => rows.push(['零点 ' + (i + 1), cplx(z) + '（' + (isZ ? '|z|=' + f3(Math.hypot(z.re, z.im)) : 'Re=' + f3(z.re)) + '）']));
+    return {
+      title: '全通 / 最小相位判定',
+      head: ['项目', '判定'],
+      rows,
+      note: isZ
+        ? '全通：零点 = 极点的共轭倒数；最小相位：全部零点 |z|<1（能量集中于 n=0 附近）'
+        : '全通：零点为极点关于虚轴的镜像；最小相位：全部零点 Re<0',
+    };
+  }
+
+  // 连续 H(s) → 离散 H(z) 映射（双线性 / 脉冲响应不变）
+  function mapTable(params) {
+    const tf = params.tf;
+    if (!tf || tf.domain !== 's') return null;       // 仅对连续系统函数
+    const s = params.samp || {};
+    const T = s.fs ? 1 / s.fs : null;
+    if (!T) return null;                              // 需要采样周期 T（由 f_s 或 T_s 给出）
+    const bl = MQP().bilinearTF(tf.num, tf.den, T);
+    const polesS = MQP().polyRoots(tf.den);
+    const ii = MQP().impulseInvariantPoles(polesS, T);
+    const rows = [];
+    rows.push(['采样周期 T', f3(T)]);
+    rows.push(['双线性 H(z) 分子 b', '[' + bl.num.map(f3).join(', ') + ']']);
+    rows.push(['双线性 H(z) 分母 a', '[' + bl.den.map(f3).join(', ') + ']']);
+    ii.forEach((p, i) => rows.push(['脉冲响应不变：s=' + cplx(polesS[i]), 'z=' + cplx(p) + '（|z|=' + f3(Math.hypot(p.re, p.im)) + '）']));
+    const stable = MQP().polyRoots(bl.den).every(r => Math.hypot(r.re, r.im) < 1 - 1e-9);
+    rows.push(['双线性映射后稳定性', stable ? '稳定（极点均在单位圆内）' : '不稳定']);
+    return {
+      title: '连续 H(s) → 离散 H(z) 映射',
+      head: ['项目', '结果'],
+      rows,
+      note: '双线性 s=(2/T)(z−1)/(z+1)，恒保稳定、无混叠但有频率畸变；脉冲响应不变 z=e^{sT}，保极点但存在频谱混叠',
+    };
+  }
+
+  // 相位与群延迟关键点
+  function phaseTable(params) {
+    const tf = params.tf || params.diff;
+    if (!tf) return null;
+    const wMax = tf.domain === 'z' ? Math.PI : 10;
+    const pick = [0, wMax * 0.1, wMax * 0.25, wMax * 0.5, wMax * 0.75, wMax];
+    const seen = new Set();
+    const rows = pick.filter(w => {
+      const k = f3(w);
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    }).map(w => {
+      const r = respAt(tf.num, tf.den, w);
+      let gd = NaN;
+      try { gd = MQP().groupDelay(tf.num, tf.den, w, tf.domain); } catch (e) { gd = NaN; }
+      return [f3(w), f3(r.mag), f3(r.ph), f3(gd)];
+    });
+    return {
+      title: '相位与群延迟关键点',
+      head: ['频率 ω', '|H|', '相位 (°)', '群延迟 τ'],
+      rows,
+      note: tf.domain === 'z'
+        ? '群延迟单位：样本；线性相位 FIR 的 τ 为常数'
+        : '群延迟单位：秒；全通网络的 τ 恒为正',
+    };
+  }
+
+  // 窗函数指标
+  function windowTable(params) {
+    const N = (params.samp && params.samp.N) ? params.samp.N : 21;
+    const nameMap = { rect: '矩形', hann: '汉宁', hamming: '汉明', blackman: '布莱克曼' };
+    const rows = ['rect', 'hann', 'hamming', 'blackman'].map(t => {
+      const m = MQP().windowMetrics(t, N);
+      return [nameMap[t], String(N), f3(m.bins) + ' bin', f3(m.sidelobeDb) + ' dB'];
+    });
+    return {
+      title: '窗函数指标（N=' + N + '）',
+      head: ['窗', '长度', '主瓣宽（零点-零点）', '最大旁瓣电平'],
+      rows,
+      note: '主瓣越窄频率分辨率越高，旁瓣越低泄漏越小；矩形窗旁瓣最高（约 −13 dB）',
+    };
+  }
+
+  // 循环卷积 vs 线性卷积
+  function circonvTable(params) {
+    const pair = pairOf(params);
+    if (!pair || pair.mode !== 'discrete') return null;
+    const a = MQP().tryCompileExpr(pair.a.expr), b = MQP().tryCompileExpr(pair.b.expr);
+    if (!a.ok || !b.ok) return null;
+    const L = 6, P = 6;
+    const sa = [], sb = [];
+    for (let n = 0; n < L; n++) { try { sa.push(a.fn({ n: n }) || 0); } catch (e) { sa.push(0); } }
+    for (let n = 0; n < P; n++) { try { sb.push(b.fn({ n: n }) || 0); } catch (e) { sb.push(0); } }
+    const lin = MQP().linearConv(sa, sb);
+    const NB = lin.length;                           // = L+P−1
+    const circ = MQP().circularConv(sa, sb, NB);
+    const rows = lin.map((v, k) => [String(k), f3(v), f3(circ[k])]);
+    const small = MQP().circularConv(sa, sb, Math.min(L, P));
+    return {
+      title: '循环卷积 vs 线性卷积（x[0…' + (L - 1) + ']，h[0…' + (P - 1) + ']）',
+      head: ['n', '线性 y[n]', 'N=' + NB + ' 循环卷积'],
+      rows,
+      note: '把两序列补零到 N ≥ L+P−1 = ' + NB + ' 后，N 点循环卷积与线性卷积逐点一致；'
+        + 'N 取 ' + Math.min(L, P) + ' 时将混叠（结果：[' + small.map(f3).join(', ') + ']）',
+    };
   }
 
   function coeffsTable(params) {
@@ -787,6 +936,8 @@
   const TABLE_BUILDERS = {
     values: valuesTable, spectrum: spectrumTable, pairs: pairsTable, poles: polesTable,
     conv: convTable, sampling: samplingTable, freqs: freqsTable, coeffs: coeffsTable,
+    roc: rocTable, allpass: allpassTable, map: mapTable,
+    phase: phaseTable, window: windowTable, circonv: circonvTable,
   };
   function buildTable(kind, params) {
     const fn = TABLE_BUILDERS[kind];
@@ -847,6 +998,41 @@
       if (p.mode === 'discrete') return { mode: 'discrete', exprA: p.a.expr, exprB: p.b.expr, varMin: '-1', varMax: '8', samples: '40' };
       return { mode: 'continuous', exprA: p.a.expr, exprB: p.b.expr, varMin: '-1', varMax: '3', samples: '400' };
     }
+    if (kind === 'groupdelay') {
+      if (!tf) return null;
+      const dom = tf.domain === 'z' ? 'z' : 's';
+      return {
+        num: '[' + tf.num.join(', ') + ']', den: '[' + tf.den.join(', ') + ']', domain: dom,
+        wMin: dom === 'z' ? '0' : '0.01', wMax: dom === 'z' ? '3.1416' : '10', samples: '400',
+        label: (params.tf ? params.tf.name : 'H') + '(' + dom + ')',
+      };
+    }
+    if (kind === 'window') {
+      const N = (params.samp && params.samp.N) ? params.samp.N : 21;
+      return { n: String(N), types: 'rect,hann,hamming,blackman', wMax: '3.1416', label: '窗函数频谱（N=' + N + '）' };
+    }
+    if (kind === 'sampling') {
+      const sm = params.samp || {};
+      if (tf) {
+        const dom = tf.domain === 'z' ? 'z' : 's';
+        return {
+          from: 'tf', num: '[' + tf.num.join(', ') + ']', den: '[' + tf.den.join(', ') + ']', domain: dom,
+          ws: sm.fs != null ? String(sm.fs) : '',
+          wMax: dom === 'z' ? '3.1416' : (sm.fs != null ? String(sm.fs) : '10'),
+          samples: '600', label: (params.tf ? params.tf.name : 'H') + ' 抽样示意',
+        };
+      }
+      if (sm.fm > 0) {
+        const fs = sm.fs != null ? sm.fs : 2.5 * sm.fm;
+        return {
+          from: 'expr', expr: 'rect(w/' + (2 * sm.fm) + ')',
+          ws: sm.fs != null ? String(sm.fs) : '',
+          wMax: String(Math.round(fs * 2.5 * 1000) / 1000),
+          samples: '600', label: '抽样示意',
+        };
+      }
+      return null;
+    }
     return null;
   }
 
@@ -872,7 +1058,7 @@
         type: 'plot', kind, label: PLOT_LABEL[kind] || kind, from,
         ready: !!fields, fields,
         missing: fields ? [] : missing,
-        hint: fields ? '' : missing.map(n => NEED_TEXT[n]).filter(Boolean).join('；'),
+        hint: fields ? '' : (missing.length ? missing.map(n => NEED_TEXT[n]).filter(Boolean).join('；') : '绘图参数需补全后才能生成'),
       });
     });
     tables.forEach((from, kind) => {

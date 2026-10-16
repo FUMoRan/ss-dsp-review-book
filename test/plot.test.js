@@ -160,9 +160,120 @@ test('DFT: cos 序列峰值落在正确频点索引', () => {
   assert.ok(argmax === m || argmax === N - m, '峰值索引应为 3 或 13，实际 ' + argmax);
 });
 
+/* ===================== 复频响 / 相位解卷绕 / 群延迟 ===================== */
+test('respComplex: H(s)=1/(s+1) 在 ω=1 处模为 1/√2、相位 -45°', () => {
+  const r = MQP.respComplex([1], [1, 1], 1, 's');
+  assert.ok(Math.abs(r.mag - Math.SQRT1_2) < 1e-9, '|H(j1)|≈0.7071');
+  assert.ok(Math.abs(r.phase + Math.PI / 4) < 1e-9, '相位应为 -π/4');
+});
+
+test('unwrapPhase: 消除 ±π 跳变，得到连续相位', () => {
+  const raw = [0, Math.PI / 2, Math.PI, -Math.PI / 2, 0];
+  const out = MQP.unwrapPhase(raw);
+  assert.equal(out.length, raw.length);
+  // 解卷绕后相邻差的绝对值不应超过 π（跳变被消除）
+  for (let i = 1; i < out.length; i++) {
+    assert.ok(Math.abs(out[i] - out[i - 1]) <= Math.PI + 1e-9, '相邻相位差应 ≤ π');
+  }
+  // 第 3 点（原 -π/2）应被抬到 π/2 的延续处
+  assert.ok(Math.abs(out[3] - 3 * Math.PI / 2) < 1e-9, '应为 3π/2，实际 ' + out[3]);
+  assert.deepEqual(MQP.unwrapPhase([]), []);
+});
+
+test('groupDelay: H(s)=1/(s+1) 在 ω=0 处群延迟为 1 秒', () => {
+  const gd = MQP.groupDelay([1], [1, 1], 0, 's');
+  assert.ok(Math.abs(gd - 1) < 1e-6, 'τ(0) 应为 1，实际 ' + gd);
+  assert.ok(MQP.groupDelay([1], [1, 1], 1, 's') < 1, 'τ 随 ω 增大应减小');
+});
+
+/* ===================== 收敛域（ROC）判定 ===================== */
+test('rocOf: 单极点 z=0.5 → 因果 ROC 在圆外且稳定', () => {
+  const info = MQP.rocOf([{ re: 0.5, im: 0 }], 'z');
+  const causal = info.regions.find(r => r.type === 'causal');
+  assert.ok(causal && /0\.5/.test(causal.roc), '因果 ROC 应为 |z|>0.5');
+  assert.equal(causal.stable, true, '极点幅值<1 时因果系统稳定');
+  assert.equal(info.causalStable, true);
+});
+
+test('rocOf: 极点 z=1.5 → 因果 ROC 在圆外且不稳定，反因果 ROC 稳定', () => {
+  const info = MQP.rocOf([{ re: 1.5, im: 0 }], 'z');
+  const causal = info.regions.find(r => r.type === 'causal');
+  const anti = info.regions.find(r => r.type === 'anticausal');
+  assert.equal(causal.stable, false, '极点幅值>1，因果系统不稳定');
+  assert.equal(anti.stable, true, '反因果 ROC 含单位圆，稳定');
+  assert.equal(info.causalStable, false);
+});
+
+test('rocOf: 连续单极点 s=-1 → 因果 ROC 为 Re(s)>-1 且稳定', () => {
+  const info = MQP.rocOf([{ re: -1, im: 0 }], 's');
+  const causal = info.regions.find(r => r.type === 'causal');
+  assert.ok(causal && /-1/.test(causal.roc));
+  assert.equal(causal.stable, true, '极点实部<0 时因果系统稳定');
+  assert.equal(MQP.rocOf([], 'z').empty, true, '无极点返回 empty');
+});
+
+/* ===================== 全通 / 最小相位 ===================== */
+test('allPassMinPhase: (z⁻¹−a)/(1−a z⁻¹) 是全通但非最小相位', () => {
+  const info = MQP.allPassMinPhase([-0.5, 1], [1, -0.5], 'z');
+  assert.equal(info.allpass, true, '零极点为共轭倒数镜像');
+  assert.equal(info.minphase, false, '存在 |z|>1 的零点');
+});
+
+test('allPassMinPhase: 零点全在单位圆内即为最小相位', () => {
+  const info = MQP.allPassMinPhase([1, 0.5], [1, -0.9], 'z');
+  assert.equal(info.minphase, true, '零点 |z|<1');
+  assert.equal(info.allpass, false, '零极点未镜像对称');
+});
+
+/* ===================== s↔z 映射 ===================== */
+test('bilinearTF: H(s)=1/(s+1), T=1 → H(z)=(z+1)/(3z−1)', () => {
+  const r = MQP.bilinearTF([1], [1, 1], 1);
+  assert.deepEqual(r.num, [1, 1]);
+  assert.deepEqual(r.den, [3, -1]);
+});
+
+test('impulseInvariantPoles: s=-1,-2, T=0.5 → z=e^{-0.5}, e^{-1}', () => {
+  const z = MQP.impulseInvariantPoles([{ re: -1, im: 0 }, { re: -2, im: 0 }], 0.5);
+  assert.ok(Math.abs(z[0].re - Math.exp(-0.5)) < 1e-12);
+  assert.ok(Math.abs(z[1].re - Math.exp(-1)) < 1e-12);
+  assert.ok(Math.abs(z[0].im) < 1e-12);
+});
+
+/* ===================== 窗函数 ===================== */
+test('windowCoeffs: 矩形窗全为 1，汉宁窗两端为 0', () => {
+  const rect = MQP.windowCoeffs('rect', 5);
+  assert.deepEqual(rect, [1, 1, 1, 1, 1]);
+  const hann = MQP.windowCoeffs('hann', 5).map(v => +v.toFixed(6));
+  assert.deepEqual(hann, [0, 0.5, 1, 0.5, 0]);
+});
+
+test('windowMetrics: 主瓣宽 rect<hann<blackman，旁瓣电平同样递增', () => {
+  const rect = MQP.windowMetrics('rect', 21);
+  const hann = MQP.windowMetrics('hann', 21);
+  const black = MQP.windowMetrics('blackman', 21);
+  assert.ok(rect.bins < hann.bins && hann.bins < black.bins, '主瓣宽应递增');
+  assert.ok(rect.sidelobeDb > hann.sidelobeDb && hann.sidelobeDb > black.sidelobeDb,
+    '旁瓣电平：矩形最高、汉宁次之、布莱克曼最低');
+});
+
+/* ===================== 卷积 ===================== */
+test('linearConv: [1,2] * [1,1] = [1,3,2]', () => {
+  assert.deepEqual(MQP.linearConv([1, 2], [1, 1]), [1, 3, 2]);
+  assert.deepEqual(MQP.linearConv([1], [1]), [1]);
+});
+
+test('circularConv: N≥L+P−1 时与线性卷积逐点一致；N 不足则混叠', () => {
+  const a = [1, 2], b = [1, 1];
+  assert.deepEqual(MQP.circularConv(a, b, 3), [1, 3, 2], 'N=3 等于线性卷积');
+  const cyc = MQP.circularConv(a, b, 2);
+  assert.equal(cyc.length, 2);
+  // N=2 时发生环绕混叠：[1+2, 3] = [3,3]
+  assert.deepEqual(cyc, [3, 3]);
+});
+
 /* ===================== 预览示例基本自洽 ===================== */
 test('PREVIEW 每种 kind 至少两个示例，参数完整且可编译', () => {
-  const kinds = ['ct', 'dt', 'spectrum', 'bode', 'polezero'];
+  const kinds = ['ct', 'dt', 'spectrum', 'bode', 'polezero', 'sampling', 'window', 'groupdelay'];
   kinds.forEach(function (kind) {
     const list = MQP.PREVIEW[kind];
     assert.ok(Array.isArray(list) && list.length >= 2, kind + ' 示例不足');
@@ -171,8 +282,11 @@ test('PREVIEW 每种 kind 至少两个示例，参数完整且可编译', () => 
       if (spec.expr) {
         assert.equal(typeof compileExpr(spec.expr), 'function', kind + ' 表达式应可编译：' + spec.expr);
       }
-      if (kind === 'bode') assert.ok(Array.isArray(spec.num) && Array.isArray(spec.den));
-      if (kind === 'polezero') assert.ok(Array.isArray(spec.num) && Array.isArray(spec.den));
+      if (kind === 'bode' || kind === 'polezero' || kind === 'groupdelay') {
+        assert.ok(Array.isArray(spec.num) && Array.isArray(spec.den), kind + ' 应有 num/den');
+      }
+      if (kind === 'window') assert.ok(typeof spec.types === 'string' && spec.types.length > 0);
+      if (kind === 'sampling') assert.ok(typeof spec.ws === 'number');
     });
   });
 });
