@@ -36,6 +36,7 @@ const MQP = window.MQP || {};   // 绘图
 const MQV = window.MQV || {};   // 卷积图解
 const MQC = window.MQC || {};   // 代码高亮
 const MQT = window.MQT || {};   // 速查表
+const MQG = window.MQG || {};   // 一键生成（标签驱动，纯本地）
 
 /* ===================== 设置（偏好，与数据分开存） ===================== */
 const SET_DEF = {
@@ -902,11 +903,21 @@ const PRESET_TAGS = {
     '实现': ['采样', '抽取', '内插', '多速率', '窗函数', 'DFT 对称性', 'FFT 算法'],
   },
 };
+// 该标签是否能驱动「一键生成」（用于给预设标签加 ⚡ 角标）
+function isDrivableTag(subject, tag) {
+  if (!MQG.drivableTags) return false;
+  const flat = t => String(t).replace(/\s+/g, '');
+  const key = flat(tag);
+  return MQG.drivableTags(subject).some(t => flat(t) === key);
+}
 function presetTagsHTML(subject) {
   const groups = PRESET_TAGS[subject] || {};
   return Object.keys(groups).map(g => `
     <div class="preset-group">${esc(g)}</div>
-    <div class="preset-tags">${groups[g].map(t => `<button type="button" class="preset-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('')}</div>
+    <div class="preset-tags">${groups[g].map(t => {
+      const ok = isDrivableTag(subject, t);
+      return `<button type="button" class="preset-tag${ok ? ' drivable' : ''}" data-tag="${esc(t)}"${ok ? ' title="该标签可驱动「一键生成」"' : ''}>${esc(t)}${ok ? '<span class="pt-bolt">⚡</span>' : ''}</button>`;
+    }).join('')}</div>
   `).join('');
 }
 function paintPresetState(box, isOn) {
@@ -1082,6 +1093,7 @@ function makeCard(it) {
       <button class="star ${it.star ? 'on' : ''}" data-act="star" title="${it.star ? '取消收藏' : '收藏'}">${it.star ? '★' : '☆'}</button>
       ${tags}${rel}
       <div class="cardacts">
+        ${hasGenPlan(it) ? `<button class="link" data-act="gen" title="按标签一键生成图表（本地离线，不联网）">⚡ 生成</button>` : ''}
         ${due}
         <span class="status ${it.status}" data-act="status">● ${STATUS[it.status]}</span>
         <button class="link" data-act="edit">编辑</button>
@@ -1113,6 +1125,8 @@ function makeCard(it) {
     btn.title = it.star ? '取消收藏' : '收藏';
     if (v.starOnly && !it.star) render();
   };
+  const genBtn = card.querySelector('[data-act="gen"]');
+  if (genBtn) genBtn.onclick = () => openGenDrawer(it);
   card.querySelector('[data-act="edit"]').onclick = () => openEdit(it);
   card.querySelector('[data-act="delete"]').onclick = () => {
     if (confirm('移入回收站？30 天内可在「设置 → 回收站」恢复。')) {
@@ -2147,6 +2161,7 @@ document.addEventListener('keydown', e => {
     if (settingsDrawer.classList.contains('open')) settingsDrawer.classList.remove('open');
     else if (refDrawer.classList.contains('open')) refDrawer.classList.remove('open');
     else if (plotDrawer.classList.contains('open')) closePlotDrawer();
+    else if (genDrawer.classList.contains('open')) closeGenDrawer();
   }
 });
 
@@ -2543,6 +2558,149 @@ document.getElementById('convPlay').onclick = () => {
   if (convCtl.isPlaying()) { convPlaying = true; setConvPlayLabel(); startConvSync(); }
   else { plotNoteEl.textContent = '当前环境不支持动画播放'; }
 };
+
+/* ===================== 一键生成（标签驱动 · 纯本地，不使用任何 API） =====================
+   入口 MQG.plan(subject, item)：先按题目标签匹配「该生成哪些图 / 表」，
+   再从题面文本确定性抽取表达式与系数，最后由 plot.js / transforms.js 的纯函数算出结果。
+   本区只负责渲染与交互，全程不联网、不读取任何 Key。 */
+const genDrawer = document.getElementById('genDrawer');
+const genSubEl = document.getElementById('genSub');
+const genParamsEl = document.getElementById('genParams');
+const genListEl = document.getElementById('genList');
+
+const GEN_NEED_NAME = {
+  ct: '连续信号', dt: '离散序列', tf: '系统函数', diff: '差分方程',
+  samp: '抽样参数', pair: '两路信号', signal: '任一信号',
+};
+
+// 该条目是否有任一标签能驱动生成（决定卡片是否显示「⚡ 生成」）
+function hasGenPlan(it) {
+  if (!MQG.tagRule) return false;
+  const subject = it.subject || settings.subject;
+  return (it.tags || []).some(t => {
+    const r = MQG.tagRule(subject, t);
+    return r && (r.plots.length || r.tables.length);
+  });
+}
+
+function genTitleText(it) {
+  const s = String((it && (it.stem || it.title)) || '').replace(/\$/g, '').replace(/\s+/g, ' ').trim();
+  return s.length > 64 ? s.slice(0, 64) + '…' : s;
+}
+
+// 题面里自动识别到的参数，做成小圆片；识别不到的给一条提示
+function genParamChips(params) {
+  const chips = [];
+  (params.ct || []).forEach(s => chips.push({ t: '连续信号 ' + s.name, hit: true }));
+  (params.dt || []).forEach(s => chips.push({ t: '离散序列 ' + s.name, hit: true }));
+  if (params.tf) chips.push({ t: '系统函数 ' + params.tf.name + '(' + params.tf.domain + ')', hit: true });
+  if (params.diff) chips.push({ t: '差分方程（阶 ' + params.diff.order + '）', hit: true });
+  if (params.samp) {
+    const parts = [];
+    if (params.samp.fs != null) parts.push('f_s=' + params.samp.fs);
+    if (params.samp.fm != null) parts.push('f_m=' + params.samp.fm);
+    if (params.samp.f0 != null) parts.push('f₀=' + params.samp.f0);
+    if (params.samp.N != null) parts.push('N=' + params.samp.N);
+    if (parts.length) chips.push({ t: '抽样参数 ' + parts.join(' '), hit: true });
+  }
+  (params.notes || []).forEach(n => chips.push({ t: n, hit: true }));
+  if (!chips.length) {
+    chips.push({ t: '未从题面识别到可解析的表达式，可把题目写成 x(t)=… / H(s)=… / y[n]=… 的形式', hit: false });
+  }
+  return chips;
+}
+
+// 表格数据 → HTML（tex:true 的单元格走 KaTeX）
+function genTableHTML(data) {
+  if (!data) return '';
+  const cell = c => (data.tex ? renderMath(String(c)) : esc(c));
+  return `<div class="gen-table">
+      <p class="setnote" style="font-weight:600; margin:4px 0 2px">${esc(data.title || '')}</p>
+      <table>
+        <thead><tr>${data.head.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>
+        <tbody>${data.rows.map(r => `<tr>${r.map(c => `<td>${cell(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>
+    </div>${data.note ? `<p class="setnote">${esc(data.note)}</p>` : ''}`;
+}
+
+function buildGenList(plan) {
+  if (!plan.items.length) {
+    genListEl.innerHTML = '<p class="gen-empty">这条内容的标签暂不驱动任何图表。可给它加上带 ⚡ 的预设标签（如「卷积」「系统函数」「抽样定理」「DFT」）后再点「⚡ 生成」。</p>';
+    return;
+  }
+  genListEl.innerHTML = plan.items.map((it, i) => {
+    const icon = it.type === 'plot' ? '📈' : '▦';
+    let ctrl;
+    if (it.ready) {
+      ctrl = it.type === 'plot'
+        ? `<button class="primary gen-go" data-i="${i}">绘制</button>`
+        : `<button class="gen-tbl" data-i="${i}">展开</button>`;
+    } else {
+      ctrl = `<span class="badge-note">缺少 ${esc(it.missing.map(m => GEN_NEED_NAME[m] || m).join('、'))}</span>`;
+    }
+    return `<div class="gen-item" data-i="${i}">
+      <div class="gen-item-head">
+        <span class="gi-icon">${icon}</span>
+        <span class="gi-label">${esc(it.label)}</span>
+        <span class="gi-from">来自标签：<b>${esc(it.from.join(' / '))}</b></span>
+        <span class="spacer"></span>${ctrl}
+      </div>
+      ${it.ready ? '' : `<div class="gen-hint">需要：${esc(it.hint || '')}</div>`}
+      <div class="gen-body"></div>
+    </div>`;
+  }).join('');
+
+  genListEl.querySelectorAll('.gen-go').forEach(b => {
+    b.onclick = () => {
+      const it = plan.items[+b.dataset.i];
+      openPlotFromGen(it.kind, it.fields);
+    };
+  });
+  genListEl.querySelectorAll('.gen-tbl').forEach(b => {
+    b.onclick = () => {
+      const it = plan.items[+b.dataset.i];
+      const box = b.closest('.gen-item').querySelector('.gen-body');
+      if (box.dataset.open === '1') { box.innerHTML = ''; box.dataset.open = '0'; b.textContent = '展开'; return; }
+      box.innerHTML = genTableHTML(it.data);
+      box.dataset.open = '1';
+      b.textContent = '收起';
+    };
+  });
+}
+
+function openGenDrawer(it) {
+  const subject = it.subject || settings.subject;
+  genDrawer.classList.add('open');
+  if (!MQG.plan) {
+    genSubEl.textContent = '生成模块（gen.js）未加载';
+    genParamsEl.innerHTML = '';
+    genListEl.innerHTML = '';
+    return;
+  }
+  const plan = MQG.plan(subject, it);
+  const title = genTitleText(it);
+  genSubEl.innerHTML = `【${esc(SUBJECT[subject] || '')}】${esc(title || '（无标题）')} · 标签 ${plan.tags.length} 个 → 命中 ${plan.items.length} 项生成`;
+  genParamsEl.innerHTML = `<div class="gen-chips">${genParamChips(plan.params)
+    .map(c => `<span class="gen-chip${c.hit ? ' hit' : ''}">${esc(c.t)}</span>`).join('')}</div>`;
+  buildGenList(plan);
+}
+function closeGenDrawer() { genDrawer.classList.remove('open'); }
+
+// 设定绘图类型（同步顶部图型分段按钮的高亮）
+function setPlotKind(kind) {
+  plotKind = kind;
+  plotKindEl.querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.kind === kind));
+}
+// 从生成面板跳到绘图面板：自动切换图型、预填字段并立即出图
+function openPlotFromGen(kind, fields) {
+  closeGenDrawer();
+  setPlotKind(kind);
+  openPlotDrawer(null);
+  if (fields) { applyPlotValues(fields); renderPlot(); }
+}
+
+document.getElementById('genClose').onclick = closeGenDrawer;
+genDrawer.onclick = e => { if (e.target === genDrawer) closeGenDrawer(); };
 
 /* ===================== AI 识题（可选功能，仅此功能需要联网） =====================
    上传题目图片 → 调用你所选服务商的视觉模型 → 按固定格式返回 → 你核对后导入。

@@ -10,6 +10,7 @@ const CORE = [
   './conv.js',
   './code.js',
   './transforms.js',
+  './gen.js',
   './app.js',
   './manifest.json',
   './vendor/katex/katex.min.css',

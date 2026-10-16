@@ -568,7 +568,35 @@ html[data-theme="dark"] .tok-op{color:#adb5bd;}
 /* ---------- 窄屏微调 ---------- */
 @media (max-width: 768px){
   .latex-bar button{font-size:11px; padding:3px 7px;}
-  #plotDrawer .drawer-panel,#refDrawer .drawer-panel{width:100vw;}
+  #plotDrawer .drawer-panel,#refDrawer .drawer-panel,#genDrawer .drawer-panel{width:100vw;}
   .lightbox-stage img{max-height:70vh;}
 }
+
+/* ---------- 一键生成面板（按标签自动生成图表） ---------- */
+#genDrawer .drawer-panel{width:min(96vw, 640px);}
+.gen-chips{display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 10px;}
+.gen-chip{
+  font-size:12px; padding:3px 10px; border-radius:20px;
+  border:1px solid var(--line); background:var(--card-2); color:var(--text-2);
+}
+.gen-chip.hit{border-color:var(--brand); color:var(--brand); background:var(--brand-soft);}
+.gen-item{
+  border:1px solid var(--line); border-radius:12px;
+  padding:10px 12px; margin:8px 0; background:var(--card-2);
+}
+.gen-item-head{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.gen-item-head .gi-icon{font-size:15px;}
+.gen-item-head .gi-label{font-weight:600;}
+.gen-item-head .gi-from{font-size:12px; color:var(--muted);}
+.gen-item-head .gi-from b{font-weight:600; color:var(--text-2);}
+.gen-item-head .spacer{margin-left:auto;}
+.gen-item .gen-hint{font-size:12px; color:var(--warn); margin-top:6px; line-height:1.5;}
+.gen-table{overflow-x:auto; margin-top:8px;}
+.gen-table table{border-collapse:collapse; width:100%; font-size:13px;}
+.gen-table th,.gen-table td{border:1px solid var(--line); padding:5px 8px; text-align:left; vertical-align:top;}
+.gen-table th{background:var(--sunken); font-weight:600; white-space:nowrap;}
+.gen-table .katex{font-size:1em;}
+.gen-empty{font-size:13px; color:var(--muted); line-height:1.6;}
+.preset-tag .pt-bolt{margin-left:4px; font-size:11px; opacity:.7;}
+.preset-tag.drivable{border-style:dashed;}
 

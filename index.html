@@ -230,6 +230,25 @@
   </div>
 </div>
 
+<!-- 一键生成面板：按标签 + 题面自动生成图表（纯本地、离线、不联网、不使用任何 API） -->
+<div class="drawer" id="genDrawer">
+  <div class="drawer-panel">
+    <div class="row" style="margin:0 0 8px">
+      <h2 style="margin:0; font-size:17px">⚡ 一键生成</h2>
+      <span class="spacer"></span>
+      <button class="ghost" id="genClose">关闭</button>
+    </div>
+    <p class="setnote" id="genSub"></p>
+    <div id="genParams"></div>
+    <div id="genList"></div>
+    <p class="setnote">
+      全部由本地纯确定性算法完成：依据题目标签匹配生成项，再从题面里自动识别表达式 / 系数 /
+      抽样参数来算图算表，<b>不联网、不使用任何 API Key</b>。识别不到的量会标出「缺少…」，
+      可先去编辑补充题目或标签。
+    </p>
+  </div>
+</div>
+
 <!-- AI 识题进行中 -->
 <div class="ai-busy" id="aiBusy">
   <div class="ai-busy-box">
@@ -425,6 +444,7 @@
 <script src="./conv.js"></script>
 <script src="./code.js"></script>
 <script src="./transforms.js"></script>
+<script src="./gen.js"></script>
 <script src="./app.js"></script>
 <!-- PWA-BEGIN -->
 <script>
