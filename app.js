@@ -29,6 +29,7 @@ const {
   makeGramProfile, simFromProfile,
   parseText, parseSearch,
   normalizeQuestion, normalizeKp, scheduleSrs, isDue, dueLabel, DAY,
+  bareMathSegments,
 } = MQ;
 
 /* 学科模块（经典脚本已先行加载，挂到 window 上） */
@@ -959,20 +960,31 @@ function figRefs(html, images) {
   });
 }
 
+// 依次识别：$$...$$ / \[...\] 行间公式，$...$ / \(...\) 行内公式，
+// 以及没有任何定界符的裸 LaTeX（如部分 AI 直接输出 y'' = \frac{dp}{dx} …）。
 function renderMath(text, images) {
   if (!text) return '';
-  const parts = String(text).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g);
+  const parts = String(text).split(/(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\$[^$\n]+?\$|\\\([\s\S]+?\\\))/g);
   return parts.map(p => {
     let m;
-    if ((m = p.match(/^\$\$([\s\S]+?)\$\$$/))) {
+    if ((m = p.match(/^\$\$([\s\S]+?)\$\$$/)) || (m = p.match(/^\\\[([\s\S]+?)\\\]$/))) {
       try { return katex.renderToString(m[1], { displayMode: true, throwOnError: false }); }
       catch (e) { return esc(p); }
     }
-    if ((m = p.match(/^\$([^$]+?)\$$/))) {
+    if ((m = p.match(/^\$([^$]+?)\$$/)) || (m = p.match(/^\\\(([\s\S]+?)\\\)$/))) {
       try { return katex.renderToString(m[1], { throwOnError: false }); }
       catch (e) { return esc(p); }
     }
-    return figRefs(esc(p), images).replace(/\n/g, '<br>');
+    return renderBareMath(p, images);
+  }).join('');
+}
+
+// 无定界符文本：切出裸 LaTeX 片段后渲染，其余按普通文本处理（保留换行与配图引用）
+function renderBareMath(text, images) {
+  return bareMathSegments(text).map(seg => {
+    if (seg.t === 'text') return figRefs(esc(seg.v), images).replace(/\n/g, '<br>');
+    try { return katex.renderToString(seg.v, { displayMode: !!seg.display, throwOnError: false }); }
+    catch (e) { return esc(seg.v); }
   }).join('');
 }
 
@@ -2861,8 +2873,10 @@ function aiOcrPrompt() {
     `请只把图中的${n}**原文**准确转录出来，不要解答，也不要添加任何解析、答案或说明。`,
     '要求：',
     '1. 只输出原文本身，不要输出【】这类标记，不要标题，不要任何解释；',
-    '2. 公式一律使用 LaTeX：行内公式用 $...$，独立公式用 $$...$$；',
+    '2. 公式一律使用 LaTeX 且必须带定界符：行内公式用 $...$，独立公式用 $$...$$；',
     '   注意：矩阵、方程组、分段函数、多行推导等会跨行的公式必须用 $$...$$ 包裹，$...$ 不能跨行；',
+    '   绝不允许输出没有任何 $ 包裹的裸公式：例如 X(j\\omega) = \\frac{1}{2+j\\omega} 这种写法是错的，必须写成 $$X(j\\omega)=\\frac{1}{2+j\\omega}$$；',
+    '   只要出现 \\frac、\\sqrt、\\int、\\sum、^、_ 这类数学写法，它就是一个公式，必须加 $...$ 或 $$...$$；',
     '3. 符号按课程惯例书写：连续时间用 $t$、$x(t)$、$X(j\\omega)$、$\\mathrm{u}(t)$、$\\delta(t)$；',
     '   离散时间用 $n$、$x[n]$、$X(e^{j\\omega})$、$H(z)$、$u[n]$、$\\delta[n]$；',
     '4. 图中若有 MATLAB / Python 代码，请先单独写一行标明语言（如 MATLAB 或 Python），再原样逐行转录；',
@@ -2897,7 +2911,10 @@ function aiOutputRules() {
   const base = [
     '1. 只输出固定格式的内容，不要输出任何解释、寒暄或标题；',
     '2. 不要用 ``` 代码块把整体包裹起来；',
-    '3. 公式一律使用 LaTeX：行内公式用 $...$，独立公式用 $$...$$；矩阵、方程组、分段函数、多行推导等会跨行的公式必须用 $$...$$ 包裹（$...$ 不能跨行）；矩阵换行用 \\\\，列用 &，例如 $$\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}$$；',
+    '3. 公式一律使用 LaTeX 且必须带定界符：行内公式用 $...$，独立公式用 $$...$$；矩阵、方程组、分段函数、多行推导等会跨行的公式必须用 $$...$$ 包裹（$...$ 不能跨行）；矩阵换行用 \\\\，列用 &，例如 $$\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}$$；',
+    '   · 最常犯的错：直接输出没有任何 $ 包裹的裸公式。像 X(j\\omega) = \\frac{1}{2+j\\omega} 这样写是错的，必须写成 $$X(j\\omega)=\\frac{1}{2+j\\omega}$$；',
+    '   · 判断标准：只要一段文字里出现 \\frac、\\sqrt、\\int、\\sum、\\lim、^、_、{ 这类数学写法，它就是公式，必须加 $...$ 或 $$...$$，一个都不能漏；',
+    '   · 所有公式都要逐个检查一遍：凡是出现在【题目】【解析】【知识点】【讲解】里的公式，都必须被 $ 或 $$ 包住。',
     '4. 不要使用 Markdown 语法：不要 **加粗**、不要 # 标题、不要 - 或 * 列表、不要 | 表格；需要分步就用行首「第 1 步：」这类前缀，每一步单独成行；',
   ];
   const steps = active === 'q' ? [
@@ -2948,8 +2965,10 @@ function aiPromptText() {
     '输出要求：',
   ].concat(aiOutputRules(), [
     '',
-    '固定格式如下（这就是我需要的输出格式）：',
+    '固定格式如下（这就是我需要的输出格式；注意示例里每一处公式都被 $ 或 $$ 包住，请照此输出）：',
     d.importExample,
+    '',
+    '特别提醒：不要把公式写成没有 $ 的裸写法，例如 X(j\\omega) = \\frac{1}{2+j\\omega} 是错的，正确写法是 $$X(j\\omega)=\\frac{1}{2+j\\omega}$$。',
     '',
     '现在请等我发送内容。',
   ]).join('\n');
