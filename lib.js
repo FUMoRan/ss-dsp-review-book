@@ -99,7 +99,6 @@
       analysis: typeof o.analysis === 'string' ? o.analysis : '',
       knowledge: typeof o.knowledge === 'string' ? o.knowledge : '',
       myAnswer: typeof o.myAnswer === 'string' ? o.myAnswer : '',
-      code: typeof o.code === 'string' ? o.code : '',
       tags: Array.isArray(o.tags) ? o.tags.filter(t => typeof t === 'string' && t.trim()) : [],
       status: STATUS[o.status] ? o.status : 'new',
       star: !!o.star,
@@ -176,11 +175,11 @@
 
   /* ---------- 搜索语法 ----------
      tag:卷积  #卷积    status:mastered/已掌握    star    due/今天
-     has:img/有图（有配图）   has:code/有代码（含代码块）
+     has:img/有图（有配图）
      其余词按普通关键词处理（AND）。 */
   const STATUS_TOKEN = { new: 'new', 未复习: 'new', reviewing: 'reviewing', 复习中: 'reviewing', mastered: 'mastered', 已掌握: 'mastered' };
   function parseSearch(str) {
-    const out = { text: '', tags: [], status: null, star: false, due: false, hasImg: false, hasCode: false };
+    const out = { text: '', tags: [], status: null, star: false, due: false, hasImg: false };
     const words = [];
     String(str || '').trim().split(/\s+/).forEach(tok => {
       if (!tok) return;
@@ -190,7 +189,6 @@
       else if (/^(star|\u661f\u6807)$/i.test(tok)) out.star = true;
       else if (/^(due|today|\u4eca\u5929|\u5f85\u590d\u4e60)$/i.test(tok)) out.due = true;
       else if (/^(?:has:img|hasimg|\u6709\u56fe)$/i.test(tok)) out.hasImg = true;
-      else if (/^(?:has:code|hascode|\u6709\u4ee3\u7801)$/i.test(tok)) out.hasCode = true;
       else words.push(tok);
     });
     out.text = words.join(' ').toLowerCase();

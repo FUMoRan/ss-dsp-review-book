@@ -533,37 +533,9 @@ html[data-imgsize="big"] .imgs img.thumb{
 .preset-tag:hover{border-color:var(--brand); color:var(--brand);}
 .preset-tag.on{border-color:var(--brand); color:var(--brand); background:var(--brand-soft);}
 
-/* ---------- 代码块（MATLAB / Python） ---------- */
-.codewrap{border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:8px 0; background:var(--sunken);}
-.code-head{
-  display:flex; align-items:center; justify-content:space-between; gap:8px;
-  padding:6px 10px; border-bottom:1px solid var(--line); background:var(--card-2);
-}
-.code-lang{font-size:12px; font-weight:600; color:var(--muted);}
-button.code-copy{font-size:12px; padding:3px 10px; border-radius:8px;}
-pre.code{
-  margin:0; padding:10px 12px; overflow-x:auto; font-size:12.5px; line-height:1.6;
-  font-family:ui-monospace,Menlo,Consolas,monospace; white-space:pre; tab-size:2;
-}
-pre.code code{font-family:inherit; color:var(--text);}
-.tok-com{color:#868e96; font-style:italic;}
-.tok-str{color:#0b7285;}
-.tok-num{color:#c2255c;}
-.tok-kw{color:#6741d9; font-weight:600;}
-.tok-fn{color:#1c7ed6;}
-.tok-op{color:#495057;}
-html[data-theme="dark"] .tok-com{color:#7a8194;}
-html[data-theme="dark"] .tok-str{color:#63e6be;}
-html[data-theme="dark"] .tok-num{color:#ffa8a8;}
-html[data-theme="dark"] .tok-kw{color:#b197fc;}
-html[data-theme="dark"] .tok-fn{color:#74c0fc;}
-html[data-theme="dark"] .tok-op{color:#adb5bd;}
-
 /* ---------- 编辑表单：字段标签与快捷标签 ---------- */
 .f-label{display:block; font-size:13px; color:var(--muted); margin:14px 0 4px;}
 .f-tags{display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;}
-.f-lang{display:flex; gap:8px; align-items:center; margin:6px 0 0;}
-.f-lang select{width:auto; padding:5px 9px; font-size:13px;}
 
 /* ---------- 窄屏微调 ---------- */
 @media (max-width: 768px){
