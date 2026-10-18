@@ -1,6 +1,6 @@
 // 离线缓存：首次访问后把页面和公式引擎缓存到本地，之后断网也能打开。
 // 采用「网络优先」：联网时总是拿最新代码，避免发新版后仍加载到旧缓存；断网时回退缓存。
-const CACHE = 'sd-review-v2';
+const CACHE = 'sd-review-v3';
 const CORE = [
   './',
   './index.html',
@@ -40,8 +40,10 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
   // 网络优先：拿到新版本就顺带更新缓存；失败（离线/超时）再用缓存兜底。
+  // 这里显式带 cache:'no-cache'，绕过浏览器的 HTTP 缓存（GitHub Pages 会对静态资源缓存约 10 分钟），
+  // 否则「网络优先」实际仍可能拿到旧文件，导致发版后页面继续跑旧代码。
   e.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then((res) => {
         if (res && res.ok) {
           const copy = res.clone();
