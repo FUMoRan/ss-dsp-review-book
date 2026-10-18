@@ -2010,6 +2010,7 @@ function openEdit(it) {
     <select id="ef_collection" class="field-input">${collectionOptionsHtml(active, it.collectionId)}</select>
   `;
   for (const key of Object.keys(d.fieldLabels)) document.getElementById('ef_' + key).value = it[key] || '';
+  document.getElementById('ef_tags').value = it.tags.join(', ');
 
   // 预设标签：点击直接切换该标签在输入框中的存在与否
   const presetBox = document.getElementById('editPreset');
