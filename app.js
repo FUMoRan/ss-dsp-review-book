@@ -16,6 +16,8 @@
    因此 localStorage / IndexedDB 的键名与库名必须完全独立，避免串库。 */
 const K_Q = 'sd_items';
 const K_K = 'sd_kps';
+const K_C_Q = 'sd_collections_q';   // 错题库的合集树
+const K_C_K = 'sd_collections_k';   // 知识点库的合集树
 const K_SET = 'sd_settings';
 const K_TRASH = 'sd_trash';
 const K_AI = 'sd_ai';
@@ -29,6 +31,9 @@ const {
   makeGramProfile, simFromProfile,
   parseText, parseSearch,
   normalizeQuestion, normalizeKp, scheduleSrs, isDue, dueLabel, DAY,
+  settleCollections, collectionSubtreeIds, flattenCollections, collectionChildren,
+  collectionPath, addCollection, renameCollection, canMoveCollection, moveCollection,
+  deleteCollection, collectionCounts, sanitizeItemCollections,
   bareMathSegments,
 } = MQ;
 
@@ -42,7 +47,7 @@ const MQG = window.MQG || {};   // 一键生成（标签驱动，纯本地）
 /* ===================== 设置（偏好，与数据分开存） ===================== */
 const SET_DEF = {
   cols: 'auto', theme: 'system', density: 'comfortable', anim: 'on',
-  imgsize: 'small', subject: 'ss',
+  imgsize: 'small', subject: 'ss', rail: 'off',
 };
 
 function readSettings() {
@@ -97,6 +102,14 @@ function applySettings() {
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+
+  document.querySelectorAll('#setRail button').forEach(b => b.classList.toggle('on', b.dataset.rail === settings.rail));
+
+  // 宽屏且已「收起」→ 侧栏切成窄竖条；窄屏（<1024）始终是抽屉，不加该类
+  if (colTreeEl) {
+    colTreeEl.classList.toggle('rail', settings.rail === 'on' && window.innerWidth >= 1024);
+    renderColTree();
+  }
 
   const note = document.getElementById('colsNote');
   if (note) {
@@ -744,6 +757,13 @@ const stores = {
   k: { key: K_K, norm: normalizeKp, items: [] },
 };
 
+/* 合集树：错题、知识点各一棵（与标签并存，互不影响） */
+const colStores = { q: [], k: [] };
+const colKey = kind => kind === 'k' ? K_C_K : K_C_Q;
+const saveCols = kind => persist(colKey(kind), colStores[kind]);
+// 合集树/未分类在侧栏里作为「虚拟节点」的筛选值
+const COL_ALL = '__all__';
+
 // 启动时从 IndexedDB 载入（并把旧版 localStorage 数据迁移过来）
 async function loadInitial() {
   for (const kind of ['q', 'k']) {
@@ -756,6 +776,16 @@ async function loadInitial() {
       stores[kind].items = (kind === 'q' ? seedQuestions() : seedKps()).map(stores[kind].norm);
     }
     await persist(key, stores[kind].items);
+  }
+  // 合集树（两库各一棵）
+  for (const kind of ['q', 'k']) {
+    const key = colKey(kind);
+    let raw = await kvGet(key);
+    if (!Array.isArray(raw)) raw = lsRead(key);
+    colStores[kind] = settleCollections(Array.isArray(raw) ? raw : []);
+    await persist(key, colStores[kind]);
+    // 把指向已不存在合集的条目纠正为「未分类」，保证筛选与计数口径一致
+    if (sanitizeItemCollections(stores[kind].items, colStores[kind])) await persist(stores[kind].key, stores[kind].items);
   }
   let t = await kvGet(K_TRASH);
   if (!Array.isArray(t)) t = lsRead(K_TRASH);
@@ -928,8 +958,8 @@ function paintPresetState(box, isOn) {
 /* ===================== 视图状态 ===================== */
 const PAGE = 30;
 const views = {
-  q: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false, imgOnly: false, codeOnly: false },
-  k: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false, imgOnly: false, codeOnly: false },
+  q: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false, imgOnly: false, codeOnly: false, collectionFilter: COL_ALL },
+  k: { visibleCount: PAGE, selected: new Set(), selectMode: false, groupMode: false, activeTags: new Set(), tagMode: 'all', search: '', status: '', starOnly: false, dueOnly: false, imgOnly: false, codeOnly: false, collectionFilter: COL_ALL },
 };
 let active = 'q';
 let editingId = null;
@@ -1019,8 +1049,15 @@ function currentFiltered() {
   const v = cur();
   const s = parseSearch(v.search);
   const now = Date.now();
+  // 合集筛选：null = 未分类；其余 = 该合集及其子合集；COL_ALL = 不过滤
+  const cf = v.collectionFilter;
+  const subIds = (cf && cf !== COL_ALL) ? collectionSubtreeIds(colStores[active] || [], cf) : null;
   const out = curItems().filter(it => {
     if (it.subject !== settings.subject) return false;
+    if (cf !== COL_ALL) {
+      if (cf == null) { if (it.collectionId) return false; }
+      else if (!it.collectionId || !subIds.has(it.collectionId)) return false;
+    }
     if (v.status && it.status !== v.status) return false;
     if (s.status && it.status !== s.status) return false;
     if (v.starOnly && !it.star) return false;
@@ -1096,6 +1133,9 @@ function makeCard(it) {
   const rel = rc
     ? `<span class="relchip" data-rel="1">相关${active === 'k' ? '错题' : '知识点'} ${rc} ${active === 'k' ? '道' : '个'}</span>` : '';
   const due = `<span class="duechip${isDue(it) ? ' due' : ''}" data-due="1" title="点击标记为「复习中」">🕒 ${dueLabel(it)}</span>`;
+  const col = it.collectionId ? collectionById(active, it.collectionId) : null;
+  const colChip = col
+    ? `<span class="colchip" data-col="${esc(col.id)}" title="所属合集，点击只看这个合集">📁 ${esc(col.name)}</span>` : '';
   const dets = visibleSections(it);
   card.innerHTML = `
     ${v.selectMode ? `<input type="checkbox" class="chk" data-act="pick" ${v.selected.has(it.id) ? 'checked' : ''}>` : ''}
@@ -1103,7 +1143,7 @@ function makeCard(it) {
     ${imgStrip(it)}
     <div class="meta">
       <button class="star ${it.star ? 'on' : ''}" data-act="star" title="${it.star ? '取消收藏' : '收藏'}">${it.star ? '★' : '☆'}</button>
-      ${tags}${rel}
+      ${tags}${rel}${colChip}
       <div class="cardacts">
         ${hasGenPlan(it) ? `<button class="link" data-act="gen" title="按标签一键生成图表（本地离线，不联网）">⚡ 生成</button>` : ''}
         ${due}
@@ -1173,6 +1213,12 @@ function makeCard(it) {
     ov.selected.clear();
     switchView(other);
   };
+  const colEl = card.querySelector('[data-col]');
+  if (colEl) colEl.onclick = () => {
+    v.collectionFilter = colEl.dataset.col;
+    closeColDrawerIfNarrow();
+    applyFilters();
+  };
   // 移动端：长按 0.5 秒进入多选并选中该项
   let pressT = null, moved = false;
   card.addEventListener('touchstart', () => {
@@ -1194,6 +1240,7 @@ function makeCard(it) {
 }
 
 function render() {
+  renderColTree();
   const v = cur();
   const filtered = currentFiltered();
   const shown = filtered.slice(0, v.visibleCount);
@@ -1278,6 +1325,236 @@ function refreshTagPicker() {
   const clear = menu.querySelector('.tagopt.clear');
   if (clear) clear.onclick = () => { v.activeTags.clear(); v.tagMode = 'all'; refreshTagPicker(); applyFilters(); };
   document.getElementById('tagPickBtn').textContent = v.activeTags.size ? `标签 · ${v.activeTags.size}个 ▾` : '标签 ▾';
+}
+
+/* ===================== 合集（文件夹式，每库一棵可嵌套的树） ===================== */
+const colTreeEl = document.getElementById('colTree');
+const colBackdrop = document.getElementById('colBackdrop');
+const colCollapsed = new Set();   // 被折叠的合集 id（默认展开）
+
+const colKind = () => active === 'k' ? 'k' : 'q';
+
+// 「侧栏收起为竖条」的偏好：全局（错题 / 知识点共用），存于 sd_settings.rail（'on' | 'off'）
+const colRailOn = () => settings.rail === 'on';
+function setColRail(on) {
+  settings.rail = on ? 'on' : 'off';
+  saveSettings();
+  applySettings();
+}
+const colList = kind => (colStores[kind] || []);
+function collectionById(kind, id) { return colList(kind).find(c => c.id === id); }
+function collectionName(kind, id) { const c = collectionById(kind, id); return c ? c.name : '未分类'; }
+
+// 生成「所属合集」下拉的选项：未分类 + 缩进树 + 新建入口
+function collectionOptionsHtml(kind, selectedId) {
+  const opts = [`<option value=""${selectedId == null ? ' selected' : ''}>未分类</option>`];
+  for (const c of flattenCollections(colList(kind))) {
+    const ind = c.depth ? '　'.repeat(c.depth) + '└ ' : '';
+    opts.push(`<option value="${esc(c.id)}"${selectedId === c.id ? ' selected' : ''}>${ind}${esc(c.name)}</option>`);
+  }
+  opts.push(`<option value="__new__">＋ 新建合集…</option>`);
+  return opts.join('');
+}
+
+// 新建合集：加在指定父节点下（同名同级拒绝）
+function addCollectionQuick(kind, parentId, name) {
+  const nm = String(name == null ? '' : name).trim();
+  if (!nm) return null;
+  const pid = parentId || null;
+  if (collectionChildren(colList(kind), pid).some(c => c.name === nm)) {
+    alert(`同级下已存在同名合集「${nm}」。`);
+    return null;
+  }
+  const r = addCollection(colList(kind), nm, pid, Date.now());
+  colStores[kind] = r.cols;
+  if (pid) colCollapsed.delete(pid);      // 展开父节点，让新建的子合集可见
+  saveCols(kind);
+  return r.node.id;
+}
+
+if (colBackdrop) colBackdrop.onclick = () => closeColDrawer();
+function openColDrawer() { colTreeEl.classList.add('open'); colBackdrop.classList.add('show'); }
+function closeColDrawer() { colTreeEl.classList.remove('open'); colBackdrop.classList.remove('show'); }
+function closeColDrawerIfNarrow() { if (window.innerWidth < 1024) closeColDrawer(); }
+document.getElementById('colToggle').onclick = () => {
+  // 宽屏：一键在「完整侧栏 ⇄ 窄竖条」之间切换；窄屏：开合抽屉（行为不变）
+  if (window.innerWidth >= 1024) { setColRail(!colRailOn()); return; }
+  colTreeEl.classList.contains('open') ? closeColDrawer() : openColDrawer();
+};
+
+const NONE_ID = '__none__';   // 侧栏「未分类」虚拟行的 id
+
+function renderColTree() {
+  if (!colTreeEl) return;
+  if (active !== 'q' && active !== 'k') { colTreeEl.innerHTML = ''; return; }
+  const kind = colKind();
+  const v = cur();
+  const cols = colList(kind);
+  const { subtree, unassigned } = collectionCounts(curItems(), cols);
+  const sel = v.collectionFilter;
+  const st = colTreeEl.scrollTop;
+
+  // 宽屏 + 已收起 → 渲染窄竖条（平铺所有合集）；否则保持现有完整树
+  if (colRailOn() && window.innerWidth >= 1024) {
+    renderColRail(kind, cols, subtree, unassigned, sel);
+    return;
+  }
+
+  const nodeRow = o => {
+    const pad = 6 + o.depth * 14;
+    const twist = o.hasKids
+      ? `<span class="twist" data-twist="${esc(o.id)}">${o.collapsed ? '▸' : '▾'}</span>`
+      : '<span class="twist"></span>';
+    const acts = o.virtual ? '' : `
+      <span class="cacts">
+        <button data-cnew="${esc(o.id)}" title="新建子合集">＋</button>
+        <button data-cedit="${esc(o.id)}" title="重命名">✎</button>
+        <button data-cdel="${esc(o.id)}" class="del" title="删除">🗑</button>
+      </span>`;
+    return `<div class="colrow${o.active ? ' active' : ''}" data-crow="${esc(o.id)}" style="padding-left:${pad}px">
+      ${twist}<span class="cname">${esc(o.name)}</span><span class="ccount">${o.count}</span>${acts}
+    </div>`;
+  };
+
+  let html = `<div class="coltree-head"><span class="t">合集</span><button class="railbtn" id="colCollapse" title="收起侧栏">«</button><button class="cls" id="colClose" title="关闭">✕</button></div>`;
+  html += nodeRow({ id: COL_ALL, name: '全部', count: curItems().length, active: sel === COL_ALL, depth: 0, virtual: true });
+  html += nodeRow({ id: NONE_ID, name: '未分类', count: unassigned, active: sel == null, depth: 0, virtual: true });
+
+  const walk = (parentId, depth) => {
+    let s = '';
+    for (const c of collectionChildren(cols, parentId)) {
+      const kids = collectionChildren(cols, c.id);
+      const collapsed = colCollapsed.has(c.id);
+      s += nodeRow({ id: c.id, name: c.name, count: subtree.get(c.id) || 0, active: sel === c.id, depth, hasKids: !!kids.length, collapsed });
+      if (kids.length && !collapsed) s += walk(c.id, depth + 1);
+    }
+    return s;
+  };
+  const tree = walk(null, 0);
+  html += tree || '<div class="col-empty">还没有合集。点下面「＋ 新建合集」开始，或先把几条内容归进去。</div>';
+  html += `<button class="coltree-new" id="colNew">＋ 新建合集</button>`;
+  colTreeEl.innerHTML = html;
+  colTreeEl.scrollTop = st;
+
+  colTreeEl.querySelectorAll('[data-crow]').forEach(el => {
+    el.onclick = e => {
+      if (e.target.closest('[data-cnew],[data-cedit],[data-cdel],[data-twist]')) return;
+      const raw = el.dataset.crow;
+      v.collectionFilter = raw === NONE_ID ? null : raw;   // COL_ALL 原样保留
+      applyFilters();
+      closeColDrawerIfNarrow();
+    };
+  });
+  colTreeEl.querySelectorAll('[data-twist]').forEach(el => {
+    el.onclick = e => {
+      e.stopPropagation();
+      const id = el.dataset.twist;
+      colCollapsed.has(id) ? colCollapsed.delete(id) : colCollapsed.add(id);
+      renderColTree();
+    };
+  });
+  colTreeEl.querySelectorAll('[data-cnew]').forEach(b => b.onclick = e => { e.stopPropagation(); createCollection(b.dataset.cnew); });
+  colTreeEl.querySelectorAll('[data-cedit]').forEach(b => b.onclick = e => { e.stopPropagation(); renameCollectionPrompt(b.dataset.cedit); });
+  colTreeEl.querySelectorAll('[data-cdel]').forEach(b => b.onclick = e => { e.stopPropagation(); deleteCollectionPrompt(b.dataset.cdel); });
+  const nb = colTreeEl.querySelector('#colNew');
+  if (nb) nb.onclick = () => createCollection(null);
+  const cb = colTreeEl.querySelector('#colClose');
+  if (cb) cb.onclick = () => closeColDrawer();
+  const cc = colTreeEl.querySelector('#colCollapse');
+  if (cc) cc.onclick = () => setColRail(true);
+}
+
+// 首字（竖条方块上显示一个字符；对代理对/emoji 安全）
+const firstChar = s => { const t = String(s == null ? '' : s).trim(); return t ? [...t][0] : '?'; };
+
+// 窄竖条：平铺「全部」「未分类」+ 所有合集（含子合集，不体现缩进），复用同一份 collectionFilter 选中态
+function renderColRail(kind, cols, subtree, unassigned, sel) {
+  const v = cur();
+  // 保留竖条内部滚动位置
+  const prev = colTreeEl.querySelector('.colrail-items');
+  const st = prev ? prev.scrollTop : 0;
+
+  const item = (id, name, active, tip) =>
+    `<button class="colrail-item${active ? ' active' : ''}" data-rrow="${esc(id)}" title="${esc(tip)}">${esc(firstChar(name))}</button>`;
+
+  let items = '';
+  items += item(COL_ALL, '全部', sel === COL_ALL, `全部 · ${curItems().length} 条`);
+  items += item(NONE_ID, '未分类', sel == null, `未分类 · ${unassigned} 条`);
+  for (const c of flattenCollections(cols)) {
+    const path = collectionPath(cols, c.id).map(x => x.name).join(' / ');
+    items += item(c.id, c.name, sel === c.id, `${path} · ${subtree.get(c.id) || 0} 条`);
+  }
+
+  colTreeEl.innerHTML = '<div class="colrail">'
+    + '<button class="colrail-btn" id="colRailExpand" title="展开合集侧栏">»</button>'
+    + `<div class="colrail-items">${items}</div>`
+    + '<button class="colrail-btn" id="colRailNew" title="新建合集">＋</button>'
+    + '</div>';
+
+  const itemsEl = colTreeEl.querySelector('.colrail-items');
+  if (itemsEl) itemsEl.scrollTop = st;
+
+  colTreeEl.querySelectorAll('[data-rrow]').forEach(el => {
+    el.onclick = () => {
+      const raw = el.dataset.rrow;
+      v.collectionFilter = raw === NONE_ID ? null : raw;   // COL_ALL 原样保留
+      applyFilters();                                       // 重渲染 → 竖条高亮与列表同步更新
+    };
+  });
+  const ex = colTreeEl.querySelector('#colRailExpand');
+  if (ex) ex.onclick = () => setColRail(false);
+  const nw = colTreeEl.querySelector('#colRailNew');
+  if (nw) nw.onclick = () => createCollection(null);
+}
+
+function createCollection(parentId) {
+  const kind = colKind();
+  const name = prompt(parentId ? '新建子合集名称：' : '新建合集名称：');
+  if (name == null) return;
+  if (addCollectionQuick(kind, parentId, name)) { renderColTree(); applyFilters(); }
+}
+
+function renameCollectionPrompt(id) {
+  const kind = colKind();
+  const c = collectionById(kind, id);
+  if (!c) return;
+  const name = prompt('重命名合集：', c.name);
+  if (name == null) return;
+  const nm = name.trim();
+  if (!nm || nm === c.name) return;
+  if (collectionChildren(colList(kind), c.parentId || null).filter(x => x.id !== id).some(x => x.name === nm)) {
+    alert(`同级下已存在同名合集「${nm}」。`);
+    return;
+  }
+  colStores[kind] = renameCollection(colList(kind), id, nm, Date.now());
+  saveCols(kind);
+  renderColTree();
+  applyFilters();
+}
+
+function deleteCollectionPrompt(id) {
+  const kind = colKind();
+  const cols = colList(kind);
+  const c = collectionById(kind, id);
+  if (!c) return;
+  const ids = collectionSubtreeIds(cols, id);
+  const extra = ids.size - 1;
+  const n = (collectionCounts(curItems(), cols).subtree.get(id)) || 0;
+  const msg = `删除合集「${c.name}」？`
+    + (extra ? `其下 ${extra} 个子合集会一并删除。` : '')
+    + (n ? `\n其中 ${n} 条内容会回到「未分类」。` : '')
+    + '\n此操作不可撤销。';
+  if (!confirm(msg)) return;
+  colStores[kind] = deleteCollection(cols, id).cols;
+  let changed = false;
+  for (const it of curItems()) {
+    if (it.collectionId && ids.has(it.collectionId)) { it.collectionId = null; changed = true; }
+  }
+  saveCols(kind);
+  if (changed) saveActive();
+  const v = cur();
+  if (v.collectionFilter && ids.has(v.collectionFilter)) v.collectionFilter = COL_ALL;
+  render();
 }
 
 /* ===================== ui ===================== */
@@ -1457,6 +1734,41 @@ document.getElementById('batchSubject').onclick = () => {
   refreshTagPicker();
   render();
 };
+/* 批量移动到合集 */
+const moveModal = document.getElementById('moveModal');
+const moveSelect = document.getElementById('moveSelect');
+document.getElementById('batchMove').onclick = () => {
+  const v = cur();
+  if (!v.selected.size) return alert('还没选任何项。');
+  // 默认选当前正在筛选的合集，省一步
+  const def = (v.collectionFilter && v.collectionFilter !== COL_ALL) ? v.collectionFilter : null;
+  moveSelect.innerHTML = collectionOptionsHtml(active, def);
+  moveModal.classList.add('open');
+};
+document.getElementById('moveCancel').onclick = () => moveModal.classList.remove('open');
+moveModal.onclick = e => { if (e.target === moveModal) moveModal.classList.remove('open'); };
+moveSelect.onchange = () => {
+  if (moveSelect.value !== '__new__') return;
+  const name = prompt('新建合集名称：');
+  const id = name == null ? null : addCollectionQuick(active, null, name);
+  moveSelect.innerHTML = collectionOptionsHtml(active, id);
+};
+document.getElementById('moveConfirm').onclick = () => {
+  const v = cur();
+  let target = moveSelect.value;
+  if (target === '__new__') {
+    const name = prompt('新建合集名称：');
+    target = name == null ? null : addCollectionQuick(active, null, name);
+  }
+  if (target === '__new__') return;
+  target = target || null;
+  curItems().forEach(it => {
+    if (v.selected.has(it.id)) { it.collectionId = target; it.updatedAt = Date.now(); }
+  });
+  saveActive();
+  moveModal.classList.remove('open');
+  render();
+};
 document.getElementById('batchDelete').onclick = () => {
   const v = cur();
   if (!v.selected.size) return alert('还没选任何项。');
@@ -1528,10 +1840,30 @@ function renderAddPreset() {
   paintPresetState(addPresetBox, x => pendingTags.has(x));
 }
 
+// 新增/粘贴导入时的「所属合集」选择（null = 未分类）
+let addCollectionId = null;
+const addColSel = document.getElementById('addCollection');
+function refreshAddCollection() {
+  addColSel.innerHTML = collectionOptionsHtml(active, addCollectionId);
+}
+function newCollectionFromAdd() {
+  const name = prompt('新建合集名称：');
+  const id = name == null ? null : addCollectionQuick(active, null, name);
+  if (id != null) addCollectionId = id;
+  refreshAddCollection();
+}
+addColSel.onchange = () => {
+  if (addColSel.value === '__new__') newCollectionFromAdd();
+  else addCollectionId = addColSel.value || null;
+};
+document.getElementById('addColNew').onclick = newCollectionFromAdd;
+
 addBtn.onclick = () => {
   pending = [];
   pendingTags = new Set();
   resetPendingImgs();
+  addCollectionId = null;
+  refreshAddCollection();
   document.getElementById('addTitle').textContent = active === 'q'
     ? `粘贴 AI 内容 / 手动填写（${curSubjectShort()}）`
     : `粘贴 / 手动新增知识点（${curSubjectShort()}）`;
@@ -1602,6 +1934,7 @@ document.getElementById('importBtn').onclick = () => {
     const o = pending[i];
     if (extra.length) o.tags = [...new Set((o.tags || []).concat(extra))];
     if (!o.subject) o.subject = settings.subject;
+    o.collectionId = addCollectionId;
     stores[active].items.push(norm(o));
   }
   saveActive();
@@ -1673,6 +2006,8 @@ function openEdit(it) {
     <label class="f-label">标签（逗号分隔）</label>
     <input id="ef_tags" class="field-input" type="text" placeholder="卷积, 傅里叶变换">
     <div id="editPreset"></div>
+    <label class="f-label">所属合集</label>
+    <select id="ef_collection" class="field-input">${collectionOptionsHtml(active, it.collectionId)}</select>
   `;
   for (const key of Object.keys(d.fieldLabels)) document.getElementById('ef_' + key).value = it[key] || '';
 
@@ -1692,6 +2027,14 @@ function openEdit(it) {
     };
   });
   paintPresetState(presetBox, on);
+
+  const colSel = document.getElementById('ef_collection');
+  colSel.onchange = () => {
+    if (colSel.value !== '__new__') return;
+    const name = prompt('新建合集名称：');
+    const id = name == null ? null : addCollectionQuick(active, null, name);
+    colSel.innerHTML = collectionOptionsHtml(active, id != null ? id : it.collectionId);
+  };
 
   document.getElementById('editImgMsg').textContent = '';
   if (document.getElementById('ef_code')) {
@@ -1716,6 +2059,8 @@ document.getElementById('editSave').onclick = () => {
   if (!it) return;
   for (const key of Object.keys(DEF[active].fieldLabels)) it[key] = document.getElementById('ef_' + key).value.trim();
   it.tags = document.getElementById('ef_tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  const colVal = document.getElementById('ef_collection').value;
+  it.collectionId = (colVal && colVal !== '__new__') ? colVal : null;
   it.updatedAt = Date.now();
   if (editOrig) [...editOrig].filter(id => !editImgs.includes(id)).forEach(dropImage);
   it.images = editImgs.slice();
@@ -1769,8 +2114,9 @@ const FILE_BASE = '信号与系统DSP复习本';
 // 体积小的纯文字备份（不含配图）
 document.getElementById('exportBtn').onclick = () => {
   const payload = {
-    version: 2, app: 'ss-dsp-review-book',
+    version: 3, app: 'ss-dsp-review-book',
     questions: stores.q.items, knowledge: stores.k.items,
+    collections: { q: colStores.q, k: colStores.k },
   };
   downloadBlob(`${FILE_BASE}-${dateStamp()}.json`,
     new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
@@ -1781,7 +2127,7 @@ document.getElementById('exportBtn').onclick = () => {
 // 完整备份：把配图以 base64 一并写入，换设备后可完整还原
 document.getElementById('exportFullBtn').onclick = async () => {
   settingsDrawer.classList.remove('open');
-  const payload = { version: 3, app: 'ss-dsp-review-book', questions: stores.q.items, knowledge: stores.k.items, images: {} };
+  const payload = { version: 4, app: 'ss-dsp-review-book', questions: stores.q.items, knowledge: stores.k.items, collections: { q: colStores.q, k: colStores.k }, images: {} };
   try {
     for (const id of referencedImageIds()) {
       const rec = await idbGet(id);
@@ -1809,13 +2155,14 @@ document.getElementById('fileInput').onchange = e => {
     let data;
     try { data = JSON.parse(reader.result); } catch (err) { alert('文件不是合法的 JSON。'); return; }
 
-    let qs = null, ks = null, imgs = null;
+    let qs = null, ks = null, imgs = null, cols = null;
     if (Array.isArray(data)) {
       qs = data;
     } else if (data && typeof data === 'object') {
       if (Array.isArray(data.questions)) qs = data.questions;
       if (Array.isArray(data.knowledge)) ks = data.knowledge;
       if (data.images && typeof data.images === 'object') imgs = data.images;
+      if (data.collections && typeof data.collections === 'object') cols = data.collections;
     }
     if (qs === null && ks === null) { alert('文件结构不符合要求，未做任何修改。'); return; }
     if (qs && !qs.every(x => x && typeof x === 'object')) { alert('questions 结构非法，未做任何修改。'); return; }
@@ -1834,6 +2181,15 @@ document.getElementById('fileInput').onchange = e => {
     }
     if (qs) { const inc = qs.map(normalizeQuestion); stores.q.items = mode ? inc : stores.q.items.concat(inc); saveStore(K_Q, stores.q.items); }
     if (ks) { const inc = ks.map(normalizeKp); stores.k.items = mode ? inc : stores.k.items.concat(inc); saveStore(K_K, stores.k.items); }
+
+    // 合集树：替换模式整体替换（文件不含合集则清空）；追加模式并入现有树，再修正非法引用
+    for (const kind of ['q', 'k']) {
+      const incoming = (cols && Array.isArray(cols[kind])) ? cols[kind] : null;
+      if (incoming) colStores[kind] = settleCollections(mode ? incoming : colStores[kind].concat(incoming));
+      else if (mode) colStores[kind] = [];
+      saveCols(kind);
+      if (sanitizeItemCollections(stores[kind].items, colStores[kind])) saveStore(stores[kind].key, stores[kind].items);
+    }
 
     let restored = 0;
     if (imgs) {
